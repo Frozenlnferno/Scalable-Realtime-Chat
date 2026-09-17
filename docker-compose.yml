@@ -1,0 +1,22 @@
+services:
+  client:
+    build:
+      context: ./client
+      args:
+        VITE_COGNITO_USER_POOL_ID: ${VITE_COGNITO_USER_POOL_ID}
+        VITE_COGNITO_USER_POOL_CLIENT_ID: ${VITE_COGNITO_USER_POOL_CLIENT_ID}
+        VITE_COGNITO_REGION: ${VITE_COGNITO_REGION}
+    ports:
+      - "5173:80"
+    depends_on:
+      - server
+
+  server:
+    build:
+      context: ./server
+    command: npm run dev
+    environment:
+      PORT: 3000
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN}
+    ports:
+      - "3000:3000"

@@ -6,6 +6,7 @@ COPY package*.json ./
 RUN npm ci
 
 COPY src ./src
+COPY migrations ./migrations
 
 ENV NODE_ENV=production
 ENV PORT=3000

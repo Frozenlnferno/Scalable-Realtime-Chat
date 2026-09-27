@@ -1,4 +1,4 @@
-import { confirmSignUp, signIn, signUp } from 'aws-amplify/auth';
+import { confirmSignUp, fetchAuthSession, getCurrentUser, signIn, signOut, signUp } from 'aws-amplify/auth';
 
 export const register = (email, password) => signUp({
   username: email,
@@ -15,6 +15,15 @@ export const login = (email, password) => signIn({
   username: email,
   password,
 });
+
+export async function getAuthenticatedSession() {
+  const [user, session] = await Promise.all([getCurrentUser(), fetchAuthSession()]);
+  const idToken = session.tokens?.idToken;
+  if (!idToken) throw new Error('Your session has expired. Please sign in again.');
+  return { cognitoSub: user.userId, email: idToken.payload.email, idToken: idToken.toString() };
+}
+
+export const logout = () => signOut();
 
 export function getAuthErrorMessage(error) {
   const messages = {

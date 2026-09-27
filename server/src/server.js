@@ -1,26 +1,39 @@
+import "dotenv/config";
+import cors from "cors";
 import express from "express";
 import { createServer } from "node:http";
 
-import chatRoutes from "./features/chat/chat.routes.js";
-import { createSocketServer } from "./socket/socket.js";
-
-import dotenv from "dotenv";
-dotenv.config();
+import { runMigrations } from "./core/database/migrate.js";
+import { authenticateRequest } from "./core/auth/authenticate.js";
+import { createSocketServer } from "./core/socket/socket.js";
+import conversationRoutes from "./features/conversations/conversation.routes.js";
+import messageRoutes from "./features/messages/message.routes.js";
+import userRoutes from "./features/users/user.routes.js";
 
 const app = express();
 const httpServer = createServer(app);
-const PORT = process.env.PORT || 3000;
+const port = Number(process.env.PORT || 3000);
 
-createSocketServer(httpServer);
+app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173" }));
+app.use(express.json({ limit: "16kb" }));
+app.get("/", (_req, res) => res.json({ message: "Chat API is running." }));
+app.use("/api/users", authenticateRequest, userRoutes);
+app.use("/api/conversations", authenticateRequest, conversationRoutes);
+app.use("/api/conversations", authenticateRequest, messageRoutes);
 
-app.use(express.json());
-
-app.get("/", (req, res) => {
-  res.json({"message": "Server is up and running!"});
+app.use((error, _req, res, _next) => {
+  const status = error.status || 500;
+  if (status >= 500) console.error(error);
+  res.status(status).json({ message: error.message || "An unexpected error occurred." });
 });
 
-app.use("/api/chat", chatRoutes);
+async function start() {
+  await runMigrations();
+  createSocketServer(httpServer);
+  httpServer.listen(port, () => console.log(`Server is running on port ${port}`));
+}
 
-httpServer.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+start().catch((error) => {
+  console.error("Unable to start server:", error);
+  process.exit(1);
 });

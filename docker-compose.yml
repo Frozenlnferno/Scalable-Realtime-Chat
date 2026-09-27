@@ -1,4 +1,20 @@
 services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-chat}
+      POSTGRES_USER: ${POSTGRES_USER:-chat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chat}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   client:
     build:
       context: ./client
@@ -6,6 +22,8 @@ services:
         VITE_COGNITO_USER_POOL_ID: ${VITE_COGNITO_USER_POOL_ID}
         VITE_COGNITO_USER_POOL_CLIENT_ID: ${VITE_COGNITO_USER_POOL_CLIENT_ID}
         VITE_COGNITO_REGION: ${VITE_COGNITO_REGION}
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:3000}
+        VITE_SOCKET_URL: ${VITE_SOCKET_URL:-http://localhost:3000}
     ports:
       - "5173:80"
     depends_on:
@@ -18,5 +36,14 @@ services:
     environment:
       PORT: 3000
       CLIENT_ORIGIN: ${CLIENT_ORIGIN}
+      DATABASE_URL: postgres://${POSTGRES_USER:-chat}:${POSTGRES_PASSWORD:-chat}@database:5432/${POSTGRES_DB:-chat}
+      COGNITO_USER_POOL_ID: ${VITE_COGNITO_USER_POOL_ID}
+      COGNITO_USER_POOL_CLIENT_ID: ${VITE_COGNITO_USER_POOL_CLIENT_ID}
     ports:
       - "3000:3000"
+    depends_on:
+      database:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import AuthForm from '../components/AuthForm';
-import { confirmRegistration, getAuthErrorMessage, login, register } from '../services/authService';
+import { confirmRegistration, getAuthErrorMessage, getAuthenticatedSession, login, register } from '../services/authService';
 
-export default function AuthPage() {
+export default function AuthPage({ onAuthenticated }) {
   const [mode, setMode] = useState('signin');
   const [confirmation, setConfirmation] = useState(false);
   const [email, setEmail] = useState('');
@@ -40,7 +40,7 @@ export default function AuthPage() {
         }
       } else {
         await login(values.email, values.password);
-        setSuccess('You are signed in.');
+        onAuthenticated(await getAuthenticatedSession());
       }
     } catch (requestError) {
       setError(getAuthErrorMessage(requestError));

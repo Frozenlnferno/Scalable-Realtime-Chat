@@ -11,10 +11,16 @@ export const confirmRegistration = (email, code) => confirmSignUp({
   confirmationCode: code,
 });
 
-export const login = (email, password) => signIn({
-  username: email,
-  password,
-});
+export async function login(email, password) {
+  const result = await signIn({ username: email, password });
+  if (!result.isSignedIn) {
+    const step = result.nextStep?.signInStep;
+    throw new Error(step
+      ? `Your account needs another verification step (${step}) before it can open the dashboard.`
+      : 'Sign-in did not complete. Please try again.');
+  }
+  return result;
+}
 
 export async function getAuthenticatedSession() {
   const [user, session] = await Promise.all([getCurrentUser(), fetchAuthSession()]);

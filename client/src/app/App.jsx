@@ -10,7 +10,23 @@ export default function App() {
     getAuthenticatedSession().then(setSession).catch(() => setSession(null));
   }, []);
 
+  useEffect(() => {
+    if (session && window.location.pathname !== '/dashboard') {
+      window.history.replaceState({}, '', '/dashboard');
+    }
+  }, [session]);
+
+  function handleAuthenticated(authenticatedSession) {
+    window.history.replaceState({}, '', '/dashboard');
+    setSession(authenticatedSession);
+  }
+
+  function handleSignedOut() {
+    window.history.replaceState({}, '', '/');
+    setSession(null);
+  }
+
   if (session === undefined) return <main className="page">Loading your account…</main>;
-  if (!session) return <AuthPage onAuthenticated={setSession} />;
-  return <DashboardPage session={session} onSignedOut={() => setSession(null)} />;
+  if (!session) return <AuthPage onAuthenticated={handleAuthenticated} />;
+  return <DashboardPage session={session} onSignedOut={handleSignedOut} />;
 }

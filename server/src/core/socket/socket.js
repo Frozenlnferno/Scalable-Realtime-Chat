@@ -1,8 +1,9 @@
 import { Server } from "socket.io";
 import { getAuthenticatedUser } from "../auth/authenticate.js";
 import { setSocketServer } from "./socket.events.js";
+import { configureSocketAdapter } from "./redis.adapter.js";
 
-export function createSocketServer(httpServer) {
+export async function createSocketServer(httpServer) {
   const io = new Server(httpServer, {
     cors: { origin: process.env.CLIENT_ORIGIN || "http://localhost:5173", methods: ["GET", "POST"] },
   });
@@ -17,6 +18,12 @@ export function createSocketServer(httpServer) {
     }
   });
   io.on("connection", (socket) => socket.join(`user:${socket.user.id}`));
+  try {
+    await configureSocketAdapter(io);
+  } catch (error) {
+    await io.close();
+    throw error;
+  }
   setSocketServer(io);
   return io;
 }

@@ -29,7 +29,16 @@ app.use((error, _req, res, _next) => {
 
 async function start() {
   await runMigrations();
-  createSocketServer(httpServer);
+  const io = await createSocketServer(httpServer);
+  let closing = false;
+  const closeSockets = async () => {
+    if (closing) return;
+    closing = true;
+    await io.close();
+    process.exit(0);
+  };
+  process.once("SIGINT", closeSockets);
+  process.once("SIGTERM", closeSockets);
   httpServer.listen(port, () => console.log(`Server is running on port ${port}`));
 }
 

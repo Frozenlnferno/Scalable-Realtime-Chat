@@ -39,6 +39,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-chat}:${POSTGRES_PASSWORD:-chat}@database:5432/${POSTGRES_DB:-chat}
       COGNITO_USER_POOL_ID: ${VITE_COGNITO_USER_POOL_ID}
       COGNITO_USER_POOL_CLIENT_ID: ${VITE_COGNITO_USER_POOL_CLIENT_ID}
+      REDIS_URL: ${REDIS_URL:-}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-chat:socket.io}
     ports:
       - "3000:3000"
     depends_on:

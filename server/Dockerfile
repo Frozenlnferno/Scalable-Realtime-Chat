@@ -8,6 +8,9 @@ RUN npm ci
 COPY src ./src
 COPY migrations ./migrations
 
+# Public trust anchors for verified RDS connections configured through DATABASE_URL.
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /app/certs/rds-global-bundle.pem
+
 ENV NODE_ENV=production
 ENV PORT=3000
 

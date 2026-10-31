@@ -3,7 +3,6 @@ import cors from "cors";
 import express from "express";
 import { createServer } from "node:http";
 
-import { runMigrations } from "./core/database/migrate.js";
 import { authenticateRequest } from "./core/auth/authenticate.js";
 import { createSocketServer } from "./core/socket/socket.js";
 import conversationRoutes from "./features/conversations/conversation.routes.js";
@@ -28,7 +27,6 @@ app.use((error, _req, res, _next) => {
 });
 
 async function start() {
-  await runMigrations();
   const io = await createSocketServer(httpServer);
   let closing = false;
   const closeSockets = async () => {

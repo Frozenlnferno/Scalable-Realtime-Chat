@@ -1,0 +1,83 @@
+config:
+  target: "{{ $env.CHAT_API_URL }}"
+  processor: ./processor.cjs
+  phases:
+    - duration: 4
+      arrivalCount: 4
+      name: Small baseline
+  environments:
+    load:
+      phases:
+        - duration: 60
+          arrivalCount: 6
+          name: Warm up
+        - duration: 120
+          arrivalCount: 60
+          name: Build
+        - duration: 300
+          arrivalRate: 1
+          name: Steady
+  payload:
+    path: "{{ $env.BENCH_CASES_FILE }}"
+    fields: [caseIndex]
+    skipHeader: true
+    order: sequence
+  http:
+    timeout: 10
+  plugins:
+    metrics-by-endpoint:
+      useOnlyRequestNames: true
+    ensure:
+      thresholds:
+        - http.response_time.p95: 500
+      conditions:
+        - expression: vusers.completed == vusers.created
+        - expression: chat.messages_planned == chat.messages_sent
+before:
+  flow:
+    - function: benchmarkReady
+scenarios:
+  - name: Read a selected conversation and send five messages
+    beforeScenario: prepareChat
+    afterScenario: finishChat
+    beforeRequest: beforeApi
+    onError: apiError
+    flow:
+      - get:
+          url: /api/users
+          name: users
+          followRedirect: false
+          headers:
+            Authorization: "Bearer {{ senderToken }}"
+          afterResponse: checkResponse
+      - post:
+          url: /api/conversations/direct
+          name: open_conversation
+          followRedirect: false
+          headers:
+            Authorization: "Bearer {{ senderToken }}"
+          json:
+            recipientUserId: "{{ recipientUserId }}"
+          afterResponse: checkResponse
+          capture:
+            - json: $.conversation.id
+              as: conversationId
+      - get:
+          url: /api/conversations/{{ conversationId }}/messages
+          name: history
+          followRedirect: false
+          headers:
+            Authorization: "Bearer {{ senderToken }}"
+          afterResponse: checkResponse
+      - loop:
+          - function: pauseMessage
+          - post:
+              url: /api/conversations/{{ conversationId }}/messages
+              name: send_message
+              followRedirect: false
+              headers:
+                Authorization: "Bearer {{ senderToken }}"
+              json:
+                body: "{{ messageBody }}"
+              afterResponse: checkResponse
+        count: 5

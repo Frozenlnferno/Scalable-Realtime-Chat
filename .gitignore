@@ -2,3 +2,6 @@ node_modules/
 .env
 dist/
 *.local
+load-tests/results/
+load-tests/*.local.csv
+load-tests/*.local.json

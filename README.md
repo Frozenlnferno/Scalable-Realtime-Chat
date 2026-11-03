@@ -82,6 +82,8 @@ The test uses a unique channel prefix, verifies delivery in both directions, che
 
 ## API
 
+For Artillery setup, AWS/CloudFront testing, saved reports, and performance measurement, see [the load-testing guide](load-tests/README.md).
+
 All endpoints require `Authorization: Bearer <Cognito ID token>`.
 
 - `GET /api/users` — synced users other than the caller.

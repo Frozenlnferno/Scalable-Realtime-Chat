@@ -1,0 +1,18 @@
+{
+  "name": "chat-load-tests",
+  "private": true,
+  "scripts": {
+    "bench": "node bench.cjs",
+    "test": "node --test test/*.test.cjs"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "devDependencies": {
+    "artillery": "2.0.34",
+    "aws-amplify": "6.20.0",
+    "socket.io": "4.8.1",
+    "socket.io-client": "4.8.4",
+    "yaml": "2.8.1"
+  }
+}

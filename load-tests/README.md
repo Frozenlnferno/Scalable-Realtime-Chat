@@ -1,173 +1,122 @@
-# API and real-time benchmarks
+# Distinct-user realtime benchmarks
 
-These tests exercise the existing AWS deployment without backend changes. `chat.yml` measures authenticated REST requests. `realtime.yml` sends through REST and verifies delivery to two connected Socket.IO clients. They do not render the React frontend.
+The default `realtime` workload gives every selected account exactly one persistent Socket.IO connection, with disjoint pairs sending in both directions. Provisioning and AWS load generation happen only through explicit commands. There are no backend or deployment changes.
 
 ## Setup (Bash)
 
-Use Node **22.18 or newer** in the same shell that runs npm. From Git Bash:
+Use **Node 22.22 or newer** for per-worker CPU accounting.
 
 ```bash
 cd /c/Users/jstno/Scalable-Realtime-Chat/load-tests
-# WSL: cd /mnt/c/Users/jstno/Scalable-Realtime-Chat/load-tests
+# WSL: /mnt/c/Users/jstno/Scalable-Realtime-Chat/load-tests
 node --version
-npm install
+npm ci
 test -f .env.local || cp .env.example .env.local
-cp users.example.json users.local.json
 ```
 
-Only copy the accounts example the first time; do not overwrite an existing account file. Subsequent dependency installs can use `npm ci` with the committed lockfile.
-
-Edit `.env.local` and set:
+Configure `.env.local` with the existing deployment:
 
 ```dotenv
-CHAT_API_URL=https://dssej3gu564di.cloudfront.net
-CHAT_COGNITO_USER_POOL_ID=YOUR_EXISTING_USER_POOL_ID
-CHAT_COGNITO_CLIENT_ID=YOUR_EXISTING_APP_CLIENT_ID
-# Optional, if sockets use a separate origin/path:
-# CHAT_SOCKET_URL=https://dssej3gu564di.cloudfront.net
-# CHAT_SOCKET_PATH=/socket.io
+CHAT_API_URL=https://YOUR_BACKEND_ORIGIN
+CHAT_COGNITO_USER_POOL_ID=us-east-1_YOUR_POOL
+CHAT_COGNITO_CLIENT_ID=YOUR_EXISTING_APP_CLIENT
+# Optional CHAT_SOCKET_URL and CHAT_SOCKET_PATH (default /socket.io)
 ```
 
-Use an origin without `/api/`; scripts supply the API paths. The Cognito identifiers are the existing frontend values `VITE_COGNITO_USER_POOL_ID` and `VITE_COGNITO_USER_POOL_CLIENT_ID`. These aliases are also accepted in this file. No app-client secret or AWS access keys are needed. The region follows the user-pool ID. The runner reads this local file; it does not automatically import the repository root's environment.
+Use an HTTP(S) origin without `/api`, credentials or queries. The frontend aliases `VITE_COGNITO_USER_POOL_ID` and `VITE_COGNITO_USER_POOL_CLIENT_ID` are accepted. The repository root environment is not loaded automatically. CloudFront/ALB must forward Authorization, disable authenticated API caching, allow POST and support WebSocket upgrades.
 
-In `users.local.json`, supply at least four **different confirmed test accounts** with permanent passwords:
+## Provision the reusable account pool
 
-```json
-[
-  { "username": "test1@example.com", "password": "YOUR_PASSWORD" },
-  { "username": "test2@example.com", "password": "YOUR_PASSWORD" },
-  { "username": "test3@example.com", "password": "YOUR_PASSWORD" },
-  { "username": "test4@example.com", "password": "YOUR_PASSWORD" }
-]
-```
-
-This file and `.env.local` are ignored by Git. Keep credentials in these files, not shell arguments. The runner does not create accounts, change Cognito settings, or bypass MFA; it stops if an account needs an additional authentication challenge. Larger pools are supported. Every unordered pair is prepared, so setup performs N(N-1)/2 conversation requests.
-
-Before measurement, the runner signs in once per account using Amplify SRP in isolated processes, validates every ID token through `/api/users`, discovers application UUIDs, and prepares conversations. Tokens must remain valid for the complete profile's maximum duration plus 60 seconds. Setup is excluded from the benchmark. Each run signs in afresh; a mid-run refresh is not needed for these bounded profiles. Temporary authentication data is removed when the runner exits normally or handles an interruption; abrupt OS/process termination may leave its `chat-bench-*` temporary directory behind. Reports never intentionally contain tokens, passwords, or account email addresses.
-
-## Run the small profiles first
-
-From `load-tests/`:
+Configure standard AWS credentials (environment, shared profile, SSO or role) permitting Cognito `AdminCreateUser` and `AdminSetUserPassword`. Region follows the pool ID. Use a mailbox supporting plus aliases and a test pool/app client permitting administrative creation and SRP sign-in.
 
 ```bash
-npm run bench -- chat --tasks 1 --seed 42
-npm run bench -- realtime --tasks 1 --seed 42
+npm run bench:users -- --count 2500 \
+  --email-base you@example.com --out users.bench.local.json
 ```
 
-The default `small` profile starts four sessions over four seconds. Each sends five messages: 20 writes and 32 scenario API requests. The API test normally finishes in under a minute; the real-time test normally takes just over a minute because sockets stay connected for at least 60 seconds.
+This command suppresses invitations, marks each test email verified and sets a random permanent password, without changing pool-wide verification. It uses four concurrent operations with throttling backoff. Generated credentials and resumable progress are saved atomically in ignored local files before remote mutations. Keep the progress journal with the credential file. Rerun the same command to resume or increase the pool; lowering the count never removes credentials/accounts. Existing unrelated credential files are rejected and preserved.
 
-The runner performs an authenticated preflight automatically before starting either scenario.
+If provisioning reports missing AWS credentials, signing in to the AWS browser console is not enough: configure credentials for the terminal with `aws configure`, or use `aws configure sso` and `aws sso login --profile YOUR_PROFILE` with `AWS_PROFILE` set to that profile. Provisioning reports safe operation-specific errors without printing raw AWS responses or secrets. Keep the existing journal and rerun the original command after fixing credentials/permissions.
 
-Use the benchmark runner for the revised chat/realtime YAML files; it supplies authentication state and case data. Running them directly without the runner is unsupported.
+A process lock prevents concurrent provisioning; valid abandoned locks recover after the owner exits. Inspect a malformed lock before removing it. Passwords and tokens are never printed. Protect local files containing reusable credentials. Alternatively supply an existing JSON array of distinct `{ "username": "...", "password": "..." }` accounts; ordinary runs never provision users.
 
-## Run the load profile
+## Validate, then choose load manually
 
 ```bash
-npm run bench -- chat --profile load --tasks 1 --seed 42
-npm run bench -- realtime --profile load --tasks 1 --seed 42
+npm run bench -- realtime --profile small --clients 4 \
+  --accounts users.bench.local.json --tasks 1 --seed 42
+
+npm run bench -- realtime --profile load --clients 500 \
+  --accounts users.bench.local.json --tasks 1 --seed 42
 ```
 
-`--tasks` is a **label**, not an AWS command. Set ECS desired capacity separately, keep it fixed, and confirm every target is healthy before testing. The runner cannot verify the task count or change autoscaling. Each command executes one run.
+`small` defaults to four clients, with a two-second ramp and ten-second measurement. `load` requires an explicit even `--clients` count, at least two and bounded by the supplied pool. It ramps over **120 seconds** and measures for **300 seconds**. A 2,500-account pool does not automatically start 2,500 clients. Rough offered rates are 125 messages/sec for 500 clients and 250 for 1,000; reports show actual scheduled/measured rates.
 
-| Phase | Time | Sessions started |
-| --- | ---: | ---: |
-| Warm-up | 60 seconds | 6 total |
-| Build | 120 seconds | 60 total |
-| Steady | 300 seconds | 1 each second |
+Selection uses a seeded shuffle of the canonical account list and disjoint pairs. Only selected accounts sign in, through four concurrent isolated SRP processes. Additional challenges fail setup. Each pair prepares one conversation and reads its history before measurement. Tokens are rechecked after preparation and must remain valid through the bounded run plus safety margin.
 
-Total: **366 sessions, 1,830 message writes, and 2,928 scenario API requests**. The real-time run normally takes about nine minutes including its final sessions finishing; the overall session deadline can extend it to ten minutes, excluding setup and CLI startup. The steady phase offers approximately five message writes/second, with roughly 60 overlapping real-time sessions and 120 sockets. These are estimates; use the report's measured concurrency and completion rates.
+The default `--workers 4` is capped by complete pairs; each pair stays on one thread. Requested and actual worker counts are recorded. Artillery runs one controller virtual user to coordinate these workers and relay custom metrics. **That controller is not the client count.** Use actual clients, distinct identities and socket timelines from the benchmark report.
 
-All runs write real database messages prefixed `[artillery ...]`. They reuse conversations and leave history intact. There is no automatic data deletion. Run against your test deployment and test accounts.
+Listeners attach before connection. Handshakes have bounded concurrency and ten-second deadlines. No messages are sent during ramp. Measurement begins after the ramp and after every client connects, with fifteen seconds of readiness grace; otherwise setup fails without messaging.
 
-## What each session does
+Both paired clients send with staggered initial slots and independently seeded 3–5-second intervals. Monotonic deadlines are independent of response completion. Up to four sends may remain pending per client. Slots over 100 ms late are skipped and recorded; limit hits and missed slots never cause silent traffic reduction or catch-up bursts. Automatic retries, reconnection and replacement clients are disabled. Individual message failures do not stop independent outcomes or shorten the measurement window. Unexpected disconnects fail the run.
 
-`chat.yml` uses Artillery's HTTP engine. A session selects a sender and a different account, fetches the directory, opens their conversation, reads history, then sends five messages with random pauses of 2–8 seconds before each send. It finishes immediately after messaging; an idle REST session is not a live socket connection.
+POST and delivery deadlines are ten seconds. Scheduling stops at the measurement boundary, outstanding work drains for at most ten seconds, and sockets, listeners, timers and temporary token files are released. Abrupt OS/process termination can leave its `chat-pool-*` temporary directory behind.
 
-`realtime.yml` connects both participants, performs the same eight REST requests, confirms each message on both designated sockets, and keeps the connections open for at least 60 seconds from when both connected. HTTP setup time is included in this connection lifetime. Event listeners are registered before POST: socket delivery may precede the HTTP response. Unrelated broadcasts are ignored. Matching conversation, sender, body, and returned message ID prevents them from satisfying the test. Duplicate matching events remain monitored during the idle period.
+## Hold deployment capacity fixed
 
-The recipient's confirmation and the sender's echo are separate metrics: **five writes do not mean ten unique messages**. The sender and recipient sockets belong to different accounts, but other sessions can reuse either account. Four users have three possible partners apiece, giving six distinct direct conversations. Additional connections sharing an account also receive that account's broadcasts; this is a shared-account/fanout workload, not hundreds of independent users. Increase the account pool before making distinct-user capacity claims.
+`--tasks` is **metadata only**. Manually set ECS desired capacity to one or three, verify all targets healthy and keep capacity/autoscaling fixed throughout each run. The runner cannot verify ECS counts. Record deployment revision, runner location/resources, task CPU/memory and initial database size.
 
-Both scripts use the same seeded case generation. Keep the seed, account ordering, runner CPU/worker configuration, profile, and code revision the same for a task-count comparison. A workload fingerprint records the case selections actually used; differing fingerprints indicate a different case assignment. Session/message correlation IDs remain unique across runs.
+Monitor ECS CPU/memory, restarts/service events; ALB target health, latency and errors; RDS CPU, connections, free memory, read/write latency and storage I/O; and Redis CPU/memory/connections. Record timestamps and infrastructure changes alongside results. Check generator health before attributing failures to backend capacity.
 
-Socket transports are WebSocket-only, with reconnection disabled. Test the frontend's polling/upgrade path separately if needed. Requests, connection setup, and delivery waits have ten-second timeouts; sessions have a 120-second deadline. Unexpected disconnects during sending **or idle time** fail the session. Message retries are disabled. A failed POST is not proof that no database write occurred.
+## Reports and acceptance
 
-## Read the reports
+Each run creates `results/realtime-pool-TASKStask-TIMESTAMP-ID/` containing:
 
-Each run prints the path to a new directory under `results/`:
+- `artillery.json`: original aggregate/interval metrics, including `pool.*` custom metrics.
+- `metadata.json`: workload version, account/pair/schedule fingerprints, clients, seed, actual/requested workers, timing, thresholds, source revision/fingerprint, runner configuration, declared tasks and start time.
+- `summary.json` and `summary.md`: outcomes, rates, distributions, connection timeline, generator health and end time.
+- `traces/pool-*.jsonl`: buffered non-secret message outcomes and lifecycle records. Aggregation streams these files using bounded histograms; percentiles are rounded up to 1 ms, conservatively at acceptance limits.
 
-```text
-results/realtime-3task-TIMESTAMP-ID/
-  artillery.json     Original aggregate and interval metrics
-  metadata.json      Profile, seed, task label, code revision, timing settings
-  summary.md         Readable results and pass/fail checks
-  summary.json       Detailed measurements and concurrency timeline
-  traces/           Per-worker non-secret timing/lifecycle records
-```
+Correlation checks unique message body, conversation, sender, designated receiving socket and returned message ID, including delivery before HTTP completion. Observations without known HTTP success remain **ambiguous submissions**. Traces retain their observed latencies. Missing recipient events, missing echoes and duplicate matching events are counted independently. Recipient confirmations and sender echoes do not represent two unique messages.
 
-**Start with `summary.md` and its checks**, then inspect endpoint distributions and concurrency in `summary.json`. The raw Artillery report retains the familiar `aggregate` and `intermediate` sections.
+Reports separate scheduled sends/sec, attempted sends/sec, successful writes/sec and unique recipient confirmations/sec. Planned, attempted, posted, confirmed, ambiguous and unattempted counts are shown, with unconfirmed-posted percentage separate from scheduled-workload completion. POST latency includes JSON parsing. Recipient/echo latency starts at POST initiation and ends in the designated Socket.IO handler. Missing outcomes do not become latency samples; inspect success counts alongside percentiles.
 
-| Metric | Meaning |
-| --- | --- |
-| API p50 / p95 / p99 | Median / 95th / 99th percentile latency, in milliseconds |
-| Endpoint timings | Directory, conversation open, history, message write |
-| `chat.delivery_ms` | POST start to matching receipt by the designated recipient |
-| `chat.echo_ms` | POST start to matching sender echo |
-| `chat.connect_ms` | One authenticated Socket.IO connection |
-| `chat.messages_planned` | Five messages for every session that starts |
-| `chat.messages_attempted` / `chat.messages_sent` | POST attempts / successful validated POST responses |
-| `chat.messages_received` / `chat.sender_echoes` | Confirmed unique deliveries for the designated sockets |
-| Active sessions / sockets | Merged lifecycle events from every worker; not a sum of worker peaks |
-| Successful requests or writes/sec | Successful completions divided by the explicit measured window duration |
+Whole-window and final-four-minute latency cohorts use **scheduled time**, including outcomes during the final drain. Receipt-time throughput counts arrivals inside each explicit window and excludes drain. The short profile uses its full ten seconds for both windows. Health includes worker thread CPU, event-loop delay, dispatch lag, missed slots and in-flight limit hits.
 
-For `chat.yml`, HTTP metrics are Artillery's **time to first byte**. The real-time processor uses native fetch and records custom `chat.http_ms.*` timings **through complete JSON parsing**, not built-in `http.*` timings. Recipient/echo timing includes network, persistence, and broadcast but not browser rendering. Clock synchronization with the server is unnecessary: durations use a monotonic clock on the runner.
+Default acceptance requires every selected identity to stay connected, every scheduled message to be attempted, successfully posted and confirmed by both sockets, zero unexpected disconnects/duplicates, API p95 below **500 ms** and recipient p95 below **200 ms**, for both whole and settled windows. Any missed slot, in-flight limit hit or worker dispatch-lag p95 above **50 ms** makes the run ineligible for capacity claims. Failed setup, Artillery or acceptance produces an unsuccessful runner exit.
 
-Summary percentiles use exact nearest-rank calculations from the trace samples. Artillery uses histograms, so its displayed percentiles can differ slightly. Failed HTTP responses in the API scenario can have timings; native-fetch failures and missing deliveries do not become successful latency samples. Always inspect success counts before interpreting latency.
-
-The summary contains whole-run, steady-phase, and settled-phase results. The settled window excludes the first minute of steady load, leaving its final four minutes. Window rates count events completed within wall-clock windows, not cohorts of sessions that started together. A delivery can arrive before its HTTP response, so interval confirmation and successful-post counts need not match exactly even when full-run counts do.
-
-Lifecycle traces use millisecond timestamps. Ordering between workers at the same millisecond is approximate. Missing/unbalanced lifecycle events fail the run rather than silently producing an authoritative concurrency claim. Normal closure after the idle hold is not counted as an unexpected disconnect.
-
-### Pass criteria
-
-- API p95 below **500 ms**.
-- Recipient delivery p95 below **200 ms** for real-time runs.
-- Every scheduled session starts and completes.
-- All planned requests succeed and all planned messages are posted.
-- Real-time messages are confirmed by both designated sockets.
-- Zero duplicate matching events or unexpected disconnects; lifecycle traces close cleanly.
-
-The runner exits nonzero when checks fail, including when Artillery exits nonzero or leaves incomplete output. It does not silently treat a partial or interrupted run as a successful benchmark. Latency criteria are project targets, not universal standards. Each window's metrics are shown separately; whole-run acceptance does not imply every reporting interval meets a target.
-
-## Compare one and three tasks
-
-Use the same runner, seed, account file/order, deployment revision, task CPU/memory, and workload. Keep task count fixed throughout each run and record any autoscaling activity. Note runner location and initial database size: these runs add history, and reused accounts/conversations can cause row contention.
-
-Run three repetitions at one task:
+## Repetitions and comparisons
 
 ```bash
-for i in 1 2 3; do
-  npm run bench -- realtime --profile load --tasks 1 --seed 42 || break
+for repetition in 1 2 3; do
+  npm run bench -- realtime --profile load --clients 500 \
+    --accounts users.bench.local.json --tasks 1 --workers 4 --seed 42 || break
 done
+# Manually set/verify three healthy ECS tasks; repeat with --tasks 3.
+
+npm run bench:compare -- --mode fixed results/RUN_A results/RUN_B
+npm run bench:compare -- --mode capacity results/RUN_1 results/RUN_2
 ```
 
-After separately setting three healthy ECS tasks, repeat with `--tasks 3`. Repeat the API scenario in the same way. A loop stops on a failed run so you can investigate before creating more load. Timestamped directories retain every attempt.
+Supply all repetition directories to establish sustainability. Two input runs provide preliminary results only. Fixed mode requires matching client counts, selections/pairs/schedules, thresholds, timing, source and runner configuration. Capacity mode permits different client counts/selections/schedules, holding per-client behavior and other comparison settings fixed. Use the same requested/actual workers, seed, account pool, target and source. Reusing a run ID does not count as a repetition.
 
-During each run, record ECS CPU/memory/task restarts, RDS CPU/connections/read-write latency, and ALB errors if applicable. Compare delivery and API p95/p99, successful throughput, failures, and measured concurrency. A lower latency from one comparison is preliminary evidence; repeatability and resource trends make the explanation stronger. These new five-message, minute-long sessions are **not equivalent** to the earlier short three-message benchmarks.
+Three passing repetitions with no failing supplied repetition at a candidate level are required to call it consistently sustainable. Comparison reports identify the **highest tested sustainable throughput**, any higher failing level, and scaling ratios from measured recipient-confirmed throughput. Test higher levels manually as needed. Reaching the pool ceiling does not establish the backend's absolute maximum.
 
-A useful resume claim states observed concurrent connections, messages/sec, latency, duration, and failures. Do not describe total sessions as concurrent users or offered throughput as maximum capacity.
+## Legacy workload, persistence and Redis evidence
 
-## AWS routing and Redis evidence
+```bash
+npm run bench -- realtime --workload sessions --profile small --accounts users.local.json
+npm run bench -- chat --profile small --accounts users.local.json
+```
 
-The existing CloudFront deployment must forward authenticated `/api/*` traffic and `/socket.io/*` traffic to the backend. Authenticated API caching must be disabled and Authorization forwarded. POST must be allowed; WebSocket handshake headers must reach the origin. HTML fallback responses are rejected by response validation. Configuration is not changed by the runner.
+The previous shared-account session workload and optional API diagnostic retain their prior behavior and require at least four accounts. Session realtime uses two connections per session, five messages with 2–8-second pauses and a one-minute socket hold. Legacy preparation opens every unordered conversation pair. Legacy results are explicitly incompatible with the revised comparison tool. Existing reports were moved into one timestamped ignored `legacy-archive/` directory outside active results. Credentials, configuration, source and database history were preserved.
 
-These tests verify delivery **through** your deployment. They cannot identify which ECS task handled a request or connection, and therefore cannot prove that a particular delivery crossed Redis. Use the existing two-server Redis integration test as separate evidence:
+Runs leave persistent database messages and conversation history. Automatic database cleanup is excluded. These benchmarks cannot identify which ECS task handled a socket or request, and do not prove cross-instance Redis forwarding. Keep the existing Redis integration test as separate evidence:
 
 ```bash
 cd ../server
 REDIS_TEST_URL='redis://YOUR_REACHABLE_TEST_REDIS:6379' npm test
 ```
-
-Keep Redis private; run that integration test from a network that can reach the test cache. It uses isolated test servers and a unique channel prefix. No backend instrumentation or deployment is required for the revised benchmarks.
 
 ## Local verification
 
@@ -176,4 +125,4 @@ cd load-tests  # from repository root
 npm test
 ```
 
-Tests cover authentication setup, deterministic workloads, response validation, delivery-before-HTTP races, missing/duplicate events, idle disconnects, deadlines, minute-long holds using a controllable clock, and merged concurrency. Local fixture tests execute the actual Artillery CLI and both YAML scenarios with shorter test-only timings, checking successful and unsuccessful exits. They never sign in to AWS or write to the AWS deployment. Temporary fixture results are stored in the OS temporary directory.
+Tests generate no AWS traffic. They cover provisioning resume/backoff, isolated SRP and expiry, deterministic selection/pairs/schedules, controllable-clock readiness/duration/overlap/timeouts/drain/cleanup, early/unrelated/missing/ambiguous/duplicate events, disconnects, generator overload, streamed cohorts, comparison compatibility and multi-worker aggregation. Real Artillery CLI scenarios run against local HTTP/Socket.IO fixtures, verify reports and check successful/unsuccessful runner results. Fixture reports use the OS temporary directory.

@@ -3,12 +3,12 @@ const path = require('node:path');
 const { fork } = require('node:child_process');
 const { validateResponse } = require('./benchmark.cjs');
 
-function readAccounts(file) {
+function readAccounts(file, minimum = 2) {
   let accounts;
   try { accounts = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch { throw new Error('Cannot read accounts; create users.local.json from users.example.json.'); }
-  if (!Array.isArray(accounts) || accounts.length < 4 || accounts.some(a => typeof a.username !== 'string' || !a.username.trim() || typeof a.password !== 'string' || !a.password)) {
-    throw new Error('Supply at least four accounts with username and password.');
+  if (!Array.isArray(accounts) || accounts.length < minimum || accounts.some(a => typeof a.username !== 'string' || !a.username.trim() || typeof a.password !== 'string' || !a.password)) {
+    throw new Error(`Supply at least ${minimum} accounts with username and password.`);
   }
   if (new Set(accounts.map(a => a.username.trim().toLowerCase())).size !== accounts.length) throw new Error('Test accounts must be distinct.');
   return accounts.map(({ username, password }) => ({ username, password }));
@@ -44,7 +44,7 @@ function validateToken(token, minExpiresAt, cognito) {
   // Signature verification is performed by the existing authenticated API preflight.
 }
 
-async function prepare({ accounts, cognito, target, maxDurationMs, signIn = authenticate, fetchImpl = fetch }) {
+async function prepare({ accounts, cognito, target, maxDurationMs, signIn = authenticate, fetchImpl = fetch, pool = false }) {
   const users = [];
   async function request(name, token, pathname, body) {
     const response = await fetchImpl(`${target}${pathname}`, {
@@ -54,21 +54,30 @@ async function prepare({ accounts, cognito, target, maxDurationMs, signIn = auth
     });
     return validateResponse(name, response.status, await response.json());
   }
-  for (let index = 0; index < accounts.length; index++) {
+  const prepareAccount = async (_, index) => {
     try {
       const token = await signIn(accounts[index], cognito);
       validateToken(token, Date.now() + maxDurationMs + 60000, cognito);
       const directory = await request('users', token, '/api/users');
-      users.push({ token, id: directory.currentUser.id });
+      users[index] = { token, id: directory.currentUser.id };
     } catch (error) {
       const reason = error.message === 'additional_authentication_challenge' ? 'requires an additional authentication challenge' : 'sign-in, token lifetime, or API validation failed';
       throw new Error(`Account ${index + 1}: ${reason}. No load was started.`);
     }
-  }
+  };
+  if (pool) await require('./pool.cjs').mapLimit(accounts, 4, prepareAccount);
+  else for (let index = 0; index < accounts.length; index++) await prepareAccount(accounts[index], index);
   if (new Set(users.map(u => u.id)).size !== users.length) throw new Error('Accounts did not resolve to distinct application users.');
   for (let a = 0; a < users.length; a++) {
-    for (let b = a + 1; b < users.length; b++) {
-      try { await request('open_conversation', users[a].token, '/api/conversations/direct', { recipientUserId: users[b].id }); }
+    if (pool && a % 2) continue;
+    for (let b = a + 1; b < (pool ? a + 2 : users.length); b++) {
+      try {
+        const opened = await request('open_conversation', users[a].token, '/api/conversations/direct', { recipientUserId: users[b].id });
+        if (pool) {
+          users[a].conversationId = users[b].conversationId = opened.conversation.id;
+          await request('history', users[a].token, `/api/conversations/${opened.conversation.id}/messages`);
+        }
+      }
       catch { throw new Error('Conversation preparation failed. No load was started.'); }
     }
   }

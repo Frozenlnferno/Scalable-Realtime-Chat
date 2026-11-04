@@ -12,11 +12,21 @@ const { readTraces, buildSummary, renderSummary } = require('./report.cjs');
 function parseOptions(args) {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
     profile: { type: 'string', default: 'small' }, tasks: { type: 'string', default: '1' }, seed: { type: 'string', default: '42' },
-    accounts: { type: 'string', default: 'users.local.json' }, 'env-file': { type: 'string', default: '.env.local' },
+    accounts: { type: 'string' }, 'env-file': { type: 'string', default: '.env.local' },
+    workload: { type: 'string' }, clients: { type: 'string' }, workers: { type: 'string' },
   } });
   if (positionals.length !== 1 || !['chat', 'realtime'].includes(positionals[0])) throw new Error('Usage: npm run bench -- chat|realtime [--profile small|load] [--tasks 1|3] [--seed 42]');
   if (!PROFILES[values.profile] || !/^\d+$/.test(values.tasks) || Number(values.tasks) < 1 || !/^\d+$/.test(values.seed) || Number(values.seed) > 0xffffffff) throw new Error('Invalid profile, task count, or seed.');
-  return { scenario: positionals[0], profile: values.profile, tasks: Number(values.tasks), seed: Number(values.seed), accountsFile: values.accounts, envFile: values['env-file'] };
+  if (values.workload && !['pool', 'sessions'].includes(values.workload)) throw new Error('Workload must be pool or sessions.');
+  const pool = positionals[0] === 'realtime' && values.workload !== 'sessions';
+  if (pool) {
+    if (values.profile === 'load' && !values.clients) throw new Error('Load runs require --clients.');
+    const clients = Number(values.clients ?? 4), workers = Number(values.workers ?? 4);
+    if (!Number.isSafeInteger(clients) || clients < 2 || clients % 2 || !Number.isSafeInteger(workers) || workers < 1 || workers > 256) throw new Error('Use even --clients >= 2 and --workers in 1..256.');
+    return { scenario: 'realtime', workload: 'pool', profile: values.profile, clients, workers, tasks: Number(values.tasks), seed: Number(values.seed), accountsFile: values.accounts || 'users.bench.local.json', envFile: values['env-file'] };
+  }
+  if (values.clients || values.workers || values.workload === 'pool') throw new Error('Clients/workers/pool apply only to the realtime pool workload.');
+  return { scenario: positionals[0], ...(positionals[0] === 'realtime' ? { workload: 'sessions' } : {}), profile: values.profile, tasks: Number(values.tasks), seed: Number(values.seed), accountsFile: values.accounts || 'users.local.json', envFile: values['env-file'] };
 }
 
 function validateTarget(value) {
@@ -27,6 +37,7 @@ function validateTarget(value) {
 }
 
 async function runBenchmark(options, dependencies = {}) {
+  if (options.scenario === 'realtime' && options.workload !== 'sessions') return require('./pool-runner.cjs').runPool(options, dependencies);
   const root = __dirname;
   if (!dependencies.skipVersionCheck) {
     const [major, minor] = process.versions.node.split('.').map(Number);
@@ -47,7 +58,7 @@ async function runBenchmark(options, dependencies = {}) {
   const expectedSessions = phases.reduce((n, p) => n + (p.arrivalCount ?? p.arrivalRate * p.duration), 0);
   const maxDurationMs = phases.reduce((n, p) => n + p.duration * 1000, 0) + timing.deadlineMs;
   console.log('Preparing accounts and conversations (excluded from measurement)...');
-  const users = dependencies.users || await prepare({ accounts: readAccounts(path.resolve(root, options.accountsFile)), cognito, target, maxDurationMs });
+  const users = dependencies.users || await prepare({ accounts: readAccounts(path.resolve(root, options.accountsFile), 4), cognito, target, maxDurationMs });
   const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
   const resultsRoot = dependencies.resultsRoot || path.join(root, 'results');
   fs.mkdirSync(resultsRoot, { recursive: true });
@@ -83,7 +94,7 @@ async function runBenchmark(options, dependencies = {}) {
     try { gitDirty = Boolean(execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch {}
     const sourceHash = createHash('sha256');
     for (const name of fs.readdirSync(root).filter(name => /\.(cjs|yml)$/.test(name) || name === 'package-lock.json').sort()) sourceHash.update(name).update(fs.readFileSync(path.join(root, name)));
-    const metadata = { schemaVersion: 2, scenario: options.scenario, profile: options.profile, tasks: options.tasks,
+    const metadata = { schemaVersion: 2, workloadVersion: 'legacy-sessions-v2', workload: 'sessions', scenario: options.scenario, profile: options.profile, tasks: options.tasks,
       seed: options.seed, accountCount: users.length, expectedSessions, runId, gitRevision, gitDirty, sourceFingerprint: sourceHash.digest('hex'), target,
       phases, timing, nodeVersion: process.version, runnerPlatform: `${os.platform()}/${os.arch()}`,
       runnerCpuCount: os.cpus().length, startedAt: new Date().toISOString() };

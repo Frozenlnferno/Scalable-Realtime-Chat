@@ -3,12 +3,15 @@
   "private": true,
   "scripts": {
     "bench": "node bench.cjs",
+    "bench:users": "node provision.cjs",
+    "bench:compare": "node compare.cjs",
     "test": "node --test test/*.test.cjs"
   },
   "engines": {
-    "node": ">=22.18.0"
+    "node": ">=22.22.0"
   },
   "devDependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "3.1161.0",
     "artillery": "2.0.34",
     "aws-amplify": "6.20.0",
     "socket.io": "4.8.1",

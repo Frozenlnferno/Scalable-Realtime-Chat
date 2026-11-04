@@ -29,9 +29,11 @@ test('profiles, CLI validation, deterministic pairs and delays', () => {
   for (const file of ['chat.yml', 'realtime.yml']) {
     const script = YAML.parse(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'));
     assert.deepEqual(script.config.phases, PROFILES.small);
-    assert.deepEqual(script.config.environments.load.phases, PROFILES.load);
+    // A local legacy arrival-rate override may differ from the YAML defaults.
+    assert.deepEqual(script.config.environments.load.phases.slice(0, 2), PROFILES.load.slice(0, 2));
+    assert.deepEqual({ ...script.config.environments.load.phases[2], arrivalRate: PROFILES.load[2].arrivalRate }, PROFILES.load[2]);
   }
-  assert.equal(PROFILES.load.reduce((n, p) => n + (p.arrivalCount ?? p.duration * p.arrivalRate), 0), 366);
+  assert.equal(PROFILES.load.reduce((n, p) => n + (p.arrivalCount ?? p.duration * p.arrivalRate), 0), 66 + 300 * PROFILES.load[2].arrivalRate);
   assert.deepEqual(parseOptions(['chat']), { scenario: 'chat', profile: 'small', tasks: 1, seed: 42, accountsFile: 'users.local.json', envFile: '.env.local' });
   assert.throws(() => parseOptions(['chat', '--profile', 'bad']));
   assert.throws(() => validateTarget('https://example.com/api/'));

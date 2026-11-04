@@ -15,7 +15,7 @@ for (const [scenario, mode, expectedPass] of [['chat', 'ok', true], ['realtime',
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-bench-test-'));
     const envFile = path.join(root, 'fixture.env');
     fs.writeFileSync(envFile, `CHAT_API_URL=${fixture.target}\n`);
-    const result = await runBenchmark({ scenario, profile: 'small', tasks: 1, seed: 42, envFile }, {
+    const result = await runBenchmark({ scenario, workload: 'sessions', profile: 'small', tasks: 1, seed: 42, envFile }, {
       users: fixture.users, resultsRoot: root, quiet: !process.env.BENCH_TEST_VERBOSE,
       phases: [{ name: 'Small baseline', duration: 1, arrivalCount: 4 }],
       timing: { delayMinMs: 1, delayMaxMs: 5, holdMs: 100, timeoutMs: 300, deadlineMs: 5000 },
@@ -44,7 +44,7 @@ test('Artillery multi-worker load fixture records phase windows and merged socke
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-bench-test-'));
   const envFile = path.join(root, 'fixture.env');
   fs.writeFileSync(envFile, `CHAT_API_URL=${fixture.target}\n`);
-  const result = await runBenchmark({ scenario: 'realtime', profile: 'load', tasks: 3, seed: 42, envFile }, {
+  const result = await runBenchmark({ scenario: 'realtime', workload: 'sessions', profile: 'load', tasks: 3, seed: 42, envFile }, {
     users: fixture.users, resultsRoot: root, quiet: !process.env.BENCH_TEST_VERBOSE,
     phases: [{ name: 'Warm up', duration: 1, arrivalCount: 1 }, { name: 'Build', duration: 1, arrivalCount: 1 }, { name: 'Steady', duration: 2, arrivalRate: 2 }],
     timing: { delayMinMs: 1, delayMaxMs: 5, holdMs: 500, timeoutMs: 1000, deadlineMs: 5000 },

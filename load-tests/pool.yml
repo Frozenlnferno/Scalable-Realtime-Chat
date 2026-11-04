@@ -1,0 +1,11 @@
+config:
+  target: http://localhost
+  processor: ./pool-controller.cjs
+  phases:
+    - duration: 1
+      arrivalCount: 1
+      name: Persistent distinct-user controller
+scenarios:
+  - name: Persistent clients (controller VU is not a user)
+    flow:
+      - function: poolController

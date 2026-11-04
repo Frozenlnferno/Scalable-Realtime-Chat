@@ -32,6 +32,7 @@ async function startFixture(mode = 'ok') {
   });
   io = new Server(server);
   io.use((socket, next) => {
+    if (mode === 'connect-error') return next(new Error('fixture connection rejected'));
     const user = users.find(u => u.token === socket.handshake.auth.token);
     if (!user) return next(new Error('unauthorized'));
     socket.user = user; next();

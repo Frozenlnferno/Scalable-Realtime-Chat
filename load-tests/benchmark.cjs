@@ -7,7 +7,7 @@ const PROFILES = {
   load: [
     { duration: 60, arrivalCount: 6, name: 'Warm up' },
     { duration: 120, arrivalCount: 60, name: 'Build' },
-    { duration: 300, arrivalRate: 1, name: 'Steady' },
+    { duration: 300, arrivalRate: 5, name: 'Steady' },
   ],
 };
 const DEFAULT_TIMING = { delayMinMs: 2000, delayMaxMs: 8000, holdMs: 60000, timeoutMs: 10000, deadlineMs: 120000 };

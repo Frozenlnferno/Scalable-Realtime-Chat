@@ -47,7 +47,7 @@ async function runPool(options, dependencies = {}) {
       const data = await response.json();
       users[i].conversationId = users[i + 1].conversationId = data.conversation.id;
     }
-  } else users = await prepare({ accounts: selected, cognito, target, maxDurationMs, pool: true });
+  } else users = await prepare({ accounts: selected, cognito, target, maxDurationMs });
   const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
   const resultDir = path.join(dependencies.resultsRoot || path.join(root, 'results'), `realtime-pool-${options.tasks}task-${runId}`);
   fs.mkdirSync(path.join(resultDir, 'traces'), { recursive: true });
@@ -107,4 +107,4 @@ async function runPool(options, dependencies = {}) {
     fs.rmdirSync(temp);
   }
 }
-module.exports = { runPool };
+module.exports = { runPool, validateTarget };

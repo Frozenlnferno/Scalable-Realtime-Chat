@@ -102,14 +102,11 @@ Supply all repetition directories to establish sustainability. Two input runs pr
 
 Three passing repetitions with no failing supplied repetition at a candidate level are required to call it consistently sustainable. Comparison reports identify the **highest tested sustainable throughput**, any higher failing level, and scaling ratios from measured recipient-confirmed throughput. Test higher levels manually as needed. Reaching the pool ceiling does not establish the backend's absolute maximum.
 
-## Legacy workload, persistence and Redis evidence
+## Persistence and Redis evidence
 
-```bash
-npm run bench -- realtime --workload sessions --profile small --accounts users.local.json
-npm run bench -- chat --profile small --accounts users.local.json
-```
+`realtime` is the only benchmark workload. `pool.yml` starts one Artillery controller, which coordinates the connection ramp and measurement in worker threads. The previous `chat` command, `--workload sessions` option and their YAML scenarios have been removed. Historical reports remain in the ignored `legacy-archive/` directory; older workload versions are rejected by the comparison tool.
 
-The previous shared-account session workload and optional API diagnostic retain their prior behavior and require at least four accounts. Session realtime uses two connections per session, five messages with 2–8-second pauses and a one-minute socket hold. Legacy preparation opens every unordered conversation pair. Legacy results are explicitly incompatible with the revised comparison tool. Existing reports were moved into one timestamped ignored `legacy-archive/` directory outside active results. Credentials, configuration, source and database history were preserved.
+Source changes invalidate strict comparisons with earlier runs. Start a fresh set of repetitions after updating the runner, even when the workload version is unchanged.
 
 Runs leave persistent database messages and conversation history. Automatic database cleanup is excluded. These benchmarks cannot identify which ECS task handled a socket or request, and do not prove cross-instance Redis forwarding. Keep the existing Redis integration test as separate evidence:
 

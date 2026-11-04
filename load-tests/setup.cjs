@@ -1,14 +1,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { fork } = require('node:child_process');
-const { validateResponse } = require('./benchmark.cjs');
+const { mapLimit } = require('./pool.cjs');
 
-function readAccounts(file, minimum = 2) {
+function readAccounts(file) {
   let accounts;
   try { accounts = JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch { throw new Error('Cannot read accounts; create users.local.json from users.example.json.'); }
-  if (!Array.isArray(accounts) || accounts.length < minimum || accounts.some(a => typeof a.username !== 'string' || !a.username.trim() || typeof a.password !== 'string' || !a.password)) {
-    throw new Error(`Supply at least ${minimum} accounts with username and password.`);
+  catch { throw new Error('Cannot read accounts; run npm run bench:users or supply a valid account file with --accounts.'); }
+  if (!Array.isArray(accounts) || accounts.length < 2 || accounts.some(a => typeof a.username !== 'string' || !a.username.trim() || typeof a.password !== 'string' || !a.password)) {
+    throw new Error('Supply at least two accounts with username and password.');
   }
   if (new Set(accounts.map(a => a.username.trim().toLowerCase())).size !== accounts.length) throw new Error('Test accounts must be distinct.');
   return accounts.map(({ username, password }) => ({ username, password }));
@@ -44,7 +44,8 @@ function validateToken(token, minExpiresAt, cognito) {
   // Signature verification is performed by the existing authenticated API preflight.
 }
 
-async function prepare({ accounts, cognito, target, maxDurationMs, signIn = authenticate, fetchImpl = fetch, pool = false }) {
+async function prepare({ accounts, cognito, target, maxDurationMs, signIn = authenticate, fetchImpl = fetch }) {
+  if (accounts.length < 2 || accounts.length % 2) throw new Error('Preparation requires complete account pairs.');
   const users = [];
   async function request(name, token, pathname, body) {
     const response = await fetchImpl(`${target}${pathname}`, {
@@ -52,7 +53,15 @@ async function prepare({ accounts, cognito, target, maxDurationMs, signIn = auth
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    return validateResponse(name, response.status, await response.json());
+    if (response.status !== 200) throw new Error('unexpected_http_response');
+    const data = await response.json();
+    const valid = {
+      users: () => data?.currentUser?.id && Array.isArray(data.users),
+      open_conversation: () => data?.conversation?.id,
+      history: () => Array.isArray(data?.messages),
+    }[name];
+    if (!valid?.()) throw new Error('unexpected_json_response');
+    return data;
   }
   const prepareAccount = async (_, index) => {
     try {
@@ -65,21 +74,14 @@ async function prepare({ accounts, cognito, target, maxDurationMs, signIn = auth
       throw new Error(`Account ${index + 1}: ${reason}. No load was started.`);
     }
   };
-  if (pool) await require('./pool.cjs').mapLimit(accounts, 4, prepareAccount);
-  else for (let index = 0; index < accounts.length; index++) await prepareAccount(accounts[index], index);
+  await mapLimit(accounts, 4, prepareAccount);
   if (new Set(users.map(u => u.id)).size !== users.length) throw new Error('Accounts did not resolve to distinct application users.');
-  for (let a = 0; a < users.length; a++) {
-    if (pool && a % 2) continue;
-    for (let b = a + 1; b < (pool ? a + 2 : users.length); b++) {
-      try {
-        const opened = await request('open_conversation', users[a].token, '/api/conversations/direct', { recipientUserId: users[b].id });
-        if (pool) {
-          users[a].conversationId = users[b].conversationId = opened.conversation.id;
-          await request('history', users[a].token, `/api/conversations/${opened.conversation.id}/messages`);
-        }
-      }
-      catch { throw new Error('Conversation preparation failed. No load was started.'); }
-    }
+  for (let a = 0; a < users.length; a += 2) {
+    try {
+      const opened = await request('open_conversation', users[a].token, '/api/conversations/direct', { recipientUserId: users[a + 1].id });
+      users[a].conversationId = users[a + 1].conversationId = opened.conversation.id;
+      await request('history', users[a].token, `/api/conversations/${opened.conversation.id}/messages`);
+    } catch { throw new Error('Conversation preparation failed. No load was started.'); }
   }
   // Recheck after all sign-ins/preparation, not just when each token was obtained.
   for (const user of users) validateToken(user.token, Date.now() + maxDurationMs + 60000, cognito);

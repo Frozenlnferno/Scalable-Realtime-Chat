@@ -7,7 +7,9 @@ const { EventEmitter } = require('node:events');
 const { TIMING, THRESHOLDS, VERSION, selectAccounts, schedule, partition } = require('../pool.cjs');
 const { parseOptions, runBenchmark } = require('../bench.cjs');
 const { provision, backoff, provisioningReason } = require('../provision.cjs');
-const { prepare } = require('../setup.cjs');
+const { prepare, validateToken } = require('../setup.cjs');
+const { signInAccount } = require('../auth-worker.cjs');
+const { validateTarget } = require('../pool-runner.cjs');
 const { createWorker } = require('../pool-worker.cjs');
 const { runController } = require('../pool-controller.cjs');
 const { compare } = require('../compare.cjs');
@@ -18,7 +20,11 @@ test('CLI requires explicit load size; seeded pool selection and complete disjoi
   assert.throws(() => parseOptions(['realtime', '--profile', 'load']), /clients/);
   for (const clients of ['1', '3', '-2', 'NaN']) assert.throws(() => parseOptions(['realtime', '--clients', clients]));
   assert.equal(parseOptions(['realtime']).clients, 4);
-  assert.equal(parseOptions(['realtime', '--workload', 'sessions']).workload, 'sessions');
+  assert.throws(() => parseOptions(['realtime', '--workload', 'sessions']));
+  assert.throws(() => parseOptions(['chat']));
+  assert.throws(() => parseOptions(['realtime', '--profile', 'bad']));
+  assert.throws(() => validateTarget('https://example.com/api/'));
+  assert.throws(() => validateTarget('https://user:password@example.com'));
   assert.equal(parseOptions(['realtime', '--accounts', 'users.local.json']).accountsFile, 'users.local.json');
   const accounts = Array.from({ length: 20 }, (_, i) => ({ username: `user${i}`, password: 'SECRET' }));
   const chosen = selectAccounts(accounts, 10, 42);
@@ -33,6 +39,22 @@ test('CLI requires explicit load size; seeded pool selection and complete disjoi
   assert.deepEqual(slots, schedule(42, 0, TIMING));
   assert.notDeepEqual(slots, schedule(42, 1, TIMING));
   assert.ok(slots.slice(1).every((n, i) => n - slots[i] >= 3000 && n - slots[i] <= 5000));
+});
+
+test('SRP auth uses separate in-memory stores and handles additional challenges', async () => {
+  const stores = [], inputs = [];
+  const dependencies = {
+    amplify: { Amplify: { configure: () => {} } },
+    cognito: { cognitoUserPoolsTokenProvider: { setKeyValueStorage: store => stores.push(store) } },
+    auth: { signIn: async input => { inputs.push(input); return { isSignedIn: true }; },
+      fetchAuthSession: async () => ({ tokens: { idToken: { toString: () => 'test-token' } } }) },
+  };
+  assert.equal(await signInAccount({ username: 'one', password: 'SECRET' }, {}, dependencies), 'test-token');
+  await stores[0].setItem('key', 'one');
+  await signInAccount({ username: 'two', password: 'SECRET' }, {}, dependencies);
+  assert.equal(await stores[1].getItem('key'), null);
+  assert.equal(inputs[0].options.authFlowType, 'USER_SRP_AUTH');
+  await assert.rejects(signInAccount({}, {}, { ...dependencies, auth: { signIn: async () => ({ isSignedIn: false }) } }), /additional_authentication_challenge/);
 });
 
 test('provision resumes permanent-password failure and preserves existing credentials', async () => {
@@ -84,7 +106,7 @@ test('pool preparation uses four auth workers and only one conversation/history 
   let active = 0, peak = 0, auth = 0, conversations = 0, histories = 0;
   const accounts = Array.from({ length: 10 }, (_, i) => ({ username: `u${i}`, password: 'SECRET' }));
   const exp = Math.floor(Date.now() / 1000) + 3600;
-  const args = { accounts, cognito: { userPoolClientId: 'client' }, target: 'http://local', maxDurationMs: 1000, pool: true,
+  const args = { accounts, cognito: { userPoolClientId: 'client' }, target: 'http://local', maxDurationMs: 1000,
     signIn: async account => { active++; peak = Math.max(peak, active); auth++; await new Promise(r => setImmediate(r)); active--; return `h.${Buffer.from(JSON.stringify({ token_use: 'id', aud: 'client', sub: account.username, exp })).toString('base64url')}.s`; },
     fetchImpl: async (url, options) => {
       let data;
@@ -96,6 +118,14 @@ test('pool preparation uses four auth workers and only one conversation/history 
   const users = await prepare(args);
   assert.equal(auth, 10); assert.equal(peak, 4); assert.equal(conversations, 5); assert.equal(histories, 5);
   assert.equal(users[0].conversationId, users[1].conversationId);
+  await assert.rejects(prepare({ ...args, signIn: async () => { throw new Error('SECRET_PASSWORD'); } }), error => /No load/.test(error.message) && !error.message.includes('SECRET_PASSWORD'));
+  await assert.rejects(prepare({ ...args, signIn: async () => { throw new Error('additional_authentication_challenge'); } }), /additional authentication challenge/);
+  for (const response of [{ status: 401, data: {} }, { status: 200, data: {} }, { status: 200, data: null }]) {
+    await assert.rejects(prepare({ ...args, fetchImpl: async () => ({ status: response.status, json: async () => response.data }) }), /No load/);
+  }
+  assert.throws(() => validateToken('not-a-token', Date.now()), /invalid/);
+  const token = `h.${Buffer.from(JSON.stringify({ sub: 'subject', token_use: 'id', aud: 'client', exp })).toString('base64url')}.s`;
+  assert.throws(() => validateToken(token, Date.now(), { userPoolClientId: 'other-client' }), /invalid/);
   const realNow = Date.now;
   try {
     let current = realNow(); Date.now = () => current;

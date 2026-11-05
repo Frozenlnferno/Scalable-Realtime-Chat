@@ -4,6 +4,13 @@ const { parentPort, workerData, isMainThread } = require('node:worker_threads');
 const { io } = require('socket.io-client');
 const { schedule, mapLimit } = require('./pool.cjs');
 const clockDefault = { now: () => performance.now(), setTimeout, clearTimeout };
+function httpErrorCode(error) {
+  const code = error?.cause?.code || error?.code;
+  if (/^(UND_ERR_(CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|SOCKET)|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EACCES|EPERM|EPIPE)$/.test(code || '')) return code;
+  if (error?.name === 'SyntaxError') return 'invalid_json';
+  if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return 'request_aborted';
+  return 'request_failed';
+}
 
 async function createWorker(config, indices, emit, dependencies = {}) {
   const clock = dependencies.clock || clockDefault, connect = dependencies.connect || io, fetchImpl = dependencies.fetchImpl || fetch;
@@ -17,7 +24,11 @@ async function createWorker(config, indices, emit, dependencies = {}) {
     const id = clock.setTimeout(() => { timers.delete(id); fn(); }, Math.max(0, ms)); timers.add(id); return id;
   };
   const clear = id => { clock.clearTimeout(id); timers.delete(id); };
-  const sleepUntil = at => new Promise(resolve => timer(resolve, at - clock.now()));
+  const sleepUntil = async at => {
+    // Timers can truncate fractional milliseconds and wake before the deadline.
+    // Recheck the monotonic clock before sending or ending measurement.
+    while (clock.now() < at) await new Promise(resolve => timer(resolve, Math.max(1, Math.ceil(at - clock.now()))));
+  };
   const stamp = () => performance.timeOrigin + clock.now();
   const record = row => emit({ at: stamp(), ...row });
   function observation(index, message) {
@@ -55,15 +66,19 @@ async function createWorker(config, indices, emit, dependencies = {}) {
   function send(index, slot, scheduledAt, lag) {
     const user = config.users[index], key = `${index}/${slot}`, body = `[bench ${config.runId}/${key}]`;
     const entry = { key, index, conversationId: user.conversationId, scheduledAt, started: clock.now(),
-      seen: {}, httpDone: false, posted: false, finalized: false, lag };
+      seen: {}, httpDone: false, httpState: 'awaiting_headers', posted: false, finalized: false, lag };
     entries.set(body, entry);
     const controller = new AbortController(); controllers.add(controller);
     const operation = new Promise(resolve => {
-      const finish = () => {
+      const finish = (reason = 'cleanup') => {
         if (entry.finalized) return;
         entry.finalized = true; clear(deadline); controller.abort(); controllers.delete(controller); finalizers.delete(finish);
         record({ type: 'message', index, key, scheduledAt, attempted: true, lag, posted: entry.posted,
           apiMs: entry.apiMs, postedAt: entry.postedAt, status: entry.status,
+          headersMs: entry.headersMs, bodyMs: entry.bodyMs, httpState: entry.httpState,
+          httpError: entry.httpError || (!entry.httpDone ? (reason === 'deadline'
+            ? entry.httpState === 'reading_body' ? 'body_deadline' : 'headers_deadline'
+            : 'cleanup_before_http_complete') : undefined),
           recipientObserved: Boolean(entry.recipient), echoObserved: Boolean(entry.echo),
           recipientObservation: entry.recipient, echoObservation: entry.echo,
           recipient: entry.posted && entry.recipient?.id === entry.id ? entry.recipient : null,
@@ -72,22 +87,30 @@ async function createWorker(config, indices, emit, dependencies = {}) {
         entries.set(body, { key, index, conversationId: entry.conversationId, seen: entry.seen, finalized: true });
         resolve();
       };
-      entry.maybeFinish = () => { if (entry.httpDone && entry.recipient && entry.echo) finish(); };
-      const deadline = timer(finish, timing.timeoutMs);
+      entry.maybeFinish = () => { if (entry.httpDone && entry.recipient && entry.echo) finish('complete'); };
+      const deadline = timer(() => finish('deadline'), timing.timeoutMs);
       finalizers.add(finish);
       (async () => {
         try {
           const response = await fetchImpl(`${config.target}/api/conversations/${user.conversationId}/messages`, {
             method: 'POST', redirect: 'error', signal: controller.signal,
             headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ body }) });
-          const data = await response.json();
           if (entry.finalized) return;
           entry.status = response.status;
+          entry.headersMs = clock.now() - entry.started;
+          entry.httpState = 'reading_body';
+          const bodyStarted = clock.now();
+          const data = await response.json();
+          if (entry.finalized) return;
+          entry.bodyMs = clock.now() - bodyStarted;
+          entry.httpState = 'complete';
           entry.apiMs = clock.now() - entry.started;
           if (response.status === 201 && data.message?.id) {
             entry.posted = true; entry.id = data.message.id; entry.postedAt = stamp();
           }
-        } catch { /* An unknown HTTP outcome can still have socket observations. */ }
+        } catch (error) {
+          if (!entry.finalized) { entry.httpState = 'failed'; entry.httpError = httpErrorCode(error); }
+        }
         finally { entry.httpDone = true; entry.maybeFinish(); }
       })();
     });
@@ -160,7 +183,7 @@ if (!isMainThread) {
         parentPort.postMessage({ metric: 'counter', name: 'pool.scheduled', value: 1 });
         for (const [field, name] of [['attempted', 'attempted'], ['posted', 'posted'], ['recipient', 'confirmed'], ['echo', 'echoes'], ['ambiguous', 'ambiguous'], ['missed', 'missed_slots'], ['limit', 'inflight_limit_hits']])
           if (row[field]) parentPort.postMessage({ metric: 'counter', name: `pool.${name}`, value: 1 });
-        for (const [name, value] of [['api_ms', row.apiMs], ['recipient_ms', row.recipient?.ms], ['echo_ms', row.echo?.ms], ['dispatch_ms', row.lag]])
+        for (const [name, value] of [['api_ms', row.apiMs], ['headers_ms', row.headersMs], ['body_ms', row.bodyMs], ['recipient_ms', row.recipient?.ms], ['echo_ms', row.echo?.ms], ['dispatch_ms', row.lag]])
           if (Number.isFinite(value)) parentPort.postMessage({ metric: 'histogram', name: `pool.${name}`, value });
       }
       if (row.type === 'socket_open' || row.type === 'socket_close') parentPort.postMessage({ metric: 'counter', name: `pool.${row.type}`, value: 1 });

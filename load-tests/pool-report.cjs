@@ -29,7 +29,7 @@ async function* traces(directory) {
   }
 }
 async function summarizePool(metadata, raw, directory, exitCode) {
-  const life = [], health = {}, workerLags = {}, boundaries = [];
+  const life = [], health = {}, workerLags = {}, boundaries = [], httpWorkers = {};
   let setupFailures = 0, disconnects = 0, duplicates = 0, missed = 0, limits = 0;
   // Pass 1 establishes the shared measurement epoch without loading traces.
   for await (const row of traces(directory)) if (row.type === 'measurement_start') boundaries.push(row);
@@ -41,7 +41,8 @@ async function summarizePool(metadata, raw, directory, exitCode) {
     for (let i = 0; i < metadata.clients; i++) planned += schedule(metadata.seed, i, metadata.timing).filter(ms => ms >= from - start).length;
     windows[name] = { start: from, end, durationSeconds: (end - from) / 1000, planned, attempted: 0, posted: 0,
       confirmed: 0, echoed: 0, ambiguous: 0, recipientObserved: 0, echoObserved: 0,
-      receiptTimeConfirmations: 0, apiMs: new Histogram(), recipientMs: new Histogram(), echoMs: new Histogram() };
+      receiptTimeConfirmations: 0, apiMs: new Histogram(), recipientMs: new Histogram(), echoMs: new Histogram(),
+      headersMs: new Histogram(), bodyMs: new Histogram(), httpErrors: {}, httpStatuses: {} };
   }
   for await (const row of traces(directory)) {
     if (row.type === 'setup_failure') setupFailures++;
@@ -52,6 +53,13 @@ async function summarizePool(metadata, raw, directory, exitCode) {
     if (row.type !== 'message') continue;
     missed += Number(Boolean(row.missed)); limits += Number(Boolean(row.limit));
     (workerLags[row.worker] ||= new Histogram()).add(row.lag);
+    if (row.attempted) {
+      const h = httpWorkers[row.worker] ||= { attempted: 0, posted: 0, apiMs: new Histogram(), headersMs: new Histogram(), bodyMs: new Histogram(), errors: {}, statuses: {} };
+      h.attempted++; h.posted += Number(Boolean(row.posted));
+      for (const key of ['apiMs', 'headersMs', 'bodyMs']) h[key].add(row[key]);
+      if (row.httpError) h.errors[row.httpError] = (h.errors[row.httpError] || 0) + 1;
+      h.statuses[row.status || 'unknown'] = (h.statuses[row.status || 'unknown'] || 0) + 1;
+    }
     for (const [name, from] of Object.entries(starts)) {
       const w = windows[name];
       if (row.recipient && row.recipient.at >= from && row.recipient.at < end) w.receiptTimeConfirmations++;
@@ -59,6 +67,9 @@ async function summarizePool(metadata, raw, directory, exitCode) {
       for (const field of ['attempted', 'posted', 'ambiguous', 'recipientObserved', 'echoObserved']) w[field] += Number(Boolean(row[field]));
       w.confirmed += Number(Boolean(row.recipient)); w.echoed += Number(Boolean(row.echo));
       w.apiMs.add(row.apiMs); w.recipientMs.add(row.recipient?.ms); w.echoMs.add(row.echo?.ms);
+      w.headersMs.add(row.headersMs); w.bodyMs.add(row.bodyMs);
+      if (row.httpError) w.httpErrors[row.httpError] = (w.httpErrors[row.httpError] || 0) + 1;
+      if (row.attempted) w.httpStatuses[row.status || 'unknown'] = (w.httpStatuses[row.status || 'unknown'] || 0) + 1;
     }
   }
   for (const w of Object.values(windows)) {
@@ -68,8 +79,9 @@ async function summarizePool(metadata, raw, directory, exitCode) {
     w.scheduledCompletionPercentage = w.planned ? 100 * w.confirmed / w.planned : 0;
     w.rates = Object.fromEntries(['planned', 'attempted', 'posted', 'confirmed'].map(key => [key, w[key] / w.durationSeconds]));
     w.receiptTimeConfirmationsPerSecond = w.receiptTimeConfirmations / w.durationSeconds;
-    for (const key of ['apiMs', 'recipientMs', 'echoMs']) w[key] = w[key].summary();
+    for (const key of ['apiMs', 'recipientMs', 'echoMs', 'headersMs', 'bodyMs']) w[key] = w[key].summary();
   }
+  for (const h of Object.values(httpWorkers)) for (const key of ['apiMs', 'headersMs', 'bodyMs']) h[key] = h[key].summary();
   life.sort((a, b) => a.at - b.at || (a.type === 'socket_open' ? -1 : 1));
   const active = new Set(), identities = new Set(), timeline = [];
   let peak = 0, minimum = metadata.clients, valid = true;
@@ -104,6 +116,8 @@ async function summarizePool(metadata, raw, directory, exitCode) {
   return { metadata, passed: checks.every(c => c.passed), capacityEligible: generatorEligible && checks.every(c => c.passed), checks, windows,
     concurrency: { minimum, peak, distinctConnectedIdentities: identities.size, valid, timeline },
     generator: { missedSlots: missed, inFlightLimitHits: limits, dispatchLagMs: lag, workers: health },
+    httpDiagnostics: { workers: httpWorkers,
+      definition: 'Headers: POST initiation to response headers, including connection queues and network/server time. Body: response headers through body reading and JSON parsing. Error codes are sanitized; raw exceptions and credentials are excluded.' },
     disconnects, duplicates, setupFailures,
     timingDefinition: 'POST through JSON parsing; designated socket handler latency from POST initiation. Cohorts use scheduled time including final drain; receipt-time throughput excludes drain. Percentiles rounded up to 1 ms.',
     limitations: ['ECS tasks are declared metadata and must be held fixed manually.', 'No per-task routing or Redis cross-instance proof.', 'Highest tested sustainable throughput is not an absolute backend maximum.', 'Runs leave persistent database messages.'] };
@@ -128,6 +142,11 @@ function renderPool(s) {
     `Generator: ${s.generator.missedSlots} missed slots; ${s.generator.inFlightLimitHits} in-flight limit hits. Capacity eligible: ${s.capacityEligible}.`,
     '', '| Worker | CPU user/system ms | Event-loop p95/max ms | Dispatch p95 ms |', '| --- | ---: | ---: | ---: |');
   for (const [id, health] of Object.entries(s.generator.workers)) lines.push(`| ${id} | ${(health.cpuMicros?.user || 0) / 1000} / ${(health.cpuMicros?.system || 0) / 1000} | ${health.eventLoopMs?.p95 ?? '-'} / ${health.eventLoopMs?.max ?? '-'} | ${s.generator.dispatchLagMs[id]?.p95 ?? '-'} |`);
+  if (s.httpDiagnostics) {
+    lines.push('', '| Worker | API p95 ms | Headers p95 ms | Body p95 ms | HTTP outcomes | Errors |', '| --- | ---: | ---: | ---: | --- | --- |');
+    for (const [id, h] of Object.entries(s.httpDiagnostics.workers)) lines.push(`| ${id} | ${h.apiMs.p95 ?? '-'} | ${h.headersMs.p95 ?? '-'} | ${h.bodyMs.p95 ?? '-'} | ${JSON.stringify(h.statuses)} | ${JSON.stringify(h.errors)} |`);
+    lines.push('', s.httpDiagnostics.definition);
+  }
   lines.push('', s.timingDefinition, '', ...s.checks.map(c => `- ${c.passed ? 'PASS' : 'FAIL'}: ${c.name}`), '', ...s.limitations.map(l => `- ${l}`));
   return lines.join('\n') + '\n';
 }

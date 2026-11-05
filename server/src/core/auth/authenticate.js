@@ -7,15 +7,19 @@ function unauthorized(message = "A valid Cognito ID token is required.") {
   return error;
 }
 
-export async function getAuthenticatedUser(token) {
-  try {
-    const claims = await verifyIdToken(token);
-    return await upsertUser(claims);
-  } catch (error) {
-    if (error.status) throw error;
-    throw unauthorized();
-  }
+export function createAuthenticator(verify = verifyIdToken, sync = upsertUser) {
+  return async (token) => {
+    let claims;
+    try {
+      claims = await verify(token);
+    } catch {
+      throw unauthorized();
+    }
+    return sync(claims);
+  };
 }
+
+export const getAuthenticatedUser = createAuthenticator();
 
 export async function authenticateRequest(req, _res, next) {
   const [scheme, token] = (req.headers.authorization || "").split(" ");

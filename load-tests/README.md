@@ -1,6 +1,6 @@
 # Distinct-user realtime benchmarks
 
-The default `realtime` workload gives every selected account exactly one persistent Socket.IO connection, with disjoint pairs sending in both directions. Provisioning and AWS load generation happen only through explicit commands. There are no backend or deployment changes.
+The default `realtime` workload gives every selected account exactly one persistent Socket.IO connection, with disjoint pairs sending in both directions. Provisioning and AWS load generation happen only through explicit commands. Benchmark commands do not deploy the backend or change infrastructure.
 
 ## Setup (Bash)
 
@@ -82,6 +82,8 @@ Correlation checks unique message body, conversation, sender, designated receivi
 Reports separate scheduled sends/sec, attempted sends/sec, successful writes/sec and unique recipient confirmations/sec. Planned, attempted, posted, confirmed, ambiguous and unattempted counts are shown, with unconfirmed-posted percentage separate from scheduled-workload completion. POST latency includes JSON parsing. Recipient/echo latency starts at POST initiation and ends in the designated Socket.IO handler. Missing outcomes do not become latency samples; inspect success counts alongside percentiles.
 
 Whole-window and final-four-minute latency cohorts use **scheduled time**, including outcomes during the final drain. Receipt-time throughput counts arrivals inside each explicit window and excludes drain. The short profile uses its full ten seconds for both windows. Health includes worker thread CPU, event-loop delay, dispatch lag, missed slots and in-flight limit hits.
+
+HTTP diagnostics split POST latency into time until response headers (`headersMs`, including connection queues, network and server time) and time reading/parsing the body (`bodyMs`). Reports show these distributions and HTTP outcomes per worker. Safe error codes distinguish deadlines before headers, deadlines while reading a body, invalid JSON and recognized transport errors. Raw exception text, tokens and passwords are excluded. These timings help investigate gaps between end-to-end latency and ALB target-processing time; they do not identify individual ECS tasks.
 
 Default acceptance requires every selected identity to stay connected, every scheduled message to be attempted, successfully posted and confirmed by both sockets, zero unexpected disconnects/duplicates, API p95 below **500 ms** and recipient p95 below **200 ms**, for both whole and settled windows. Any missed slot, in-flight limit hit or worker dispatch-lag p95 above **50 ms** makes the run ineligible for capacity claims. Failed setup, Artillery or acceptance produces an unsuccessful runner exit.
 

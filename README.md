@@ -80,6 +80,59 @@ npm test
 
 The test uses a unique channel prefix, verifies delivery in both directions, checks recipient isolation and duplicates, and closes both Redis connections on shutdown. Without `REDIS_TEST_URL`, it is explicitly skipped. Tests read this variable from the process environment, not `.env`.
 
+## Database contention and overload handling
+
+Conversation and message HTTP routes authenticate once. Every request and socket connection still verifies its Cognito token; existing users with unchanged emails are resolved with an indexed read instead of a profile rewrite. New users and email changes use the conflict-safe upsert. Message insertion and conversation timestamp updates commit together in one SQL statement; socket events are emitted after that statement succeeds. An existing-user message normally performs three database calls: `users.resolve`, `conversations.participant`, and `messages.insert_and_touch`.
+
+Application database sessions use these server environment settings (also forwarded by Compose):
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `DB_POOL_MAX` | 10 | Maximum connections per backend process |
+| `DB_POOL_MAX_WAITING` | 100 | Maximum queued acquisitions when the pool is saturated; zero rejects immediately |
+| `DB_POOL_ACQUIRE_TIMEOUT_MS` | 2000 | Maximum connection acquisition time |
+| `DB_STATEMENT_TIMEOUT_MS` | 5000 | PostgreSQL statement execution timeout |
+| `DB_LOCK_TIMEOUT_MS` | 1000 | PostgreSQL lock acquisition timeout |
+
+Values must be non-negative integers for the queue limit and positive integers otherwise. Lock timeout must be shorter than statement timeout; invalid settings fail startup. Limits apply regardless of diagnostic logging. Migration sessions do not inherit these application timeouts. The backend returns HTTP **503** with a generic message for pool overload, acquisition timeout, and recognized database timeout/unavailability errors. Invalid Cognito credentials remain HTTP **401**; database failures during user resolution are not classified as invalid credentials. Expected 503s are covered by the bounded timing logs, not logged individually.
+
+There are no automatic message retries. A lost response can leave the result unknown even if the write committed. These limits bound individual database operations, not total request time. Keep the pool at 10 for the first retest. Any later increase must account for all backend processes, replacement tasks during deployment, other database clients, and the RDS connection budget.
+
+Backend regression checks run with `npm test` from `server/`. To include PostgreSQL integration checks, set `TEST_DATABASE_URL` to a dedicated local test database before running them. The tests create and remove their own randomly named schema and verify concurrent user synchronization, atomic writes/rollback, the three-query HTTP path, and real pool/statement/lock timeouts. They never use the deployment's `DATABASE_URL` as a fallback. The Redis integration check still requires `REDIS_TEST_URL` separately.
+
+For rollout, publish a uniquely tagged backend image, create a task-definition revision with the settings above, and wait until all three replacement tasks are healthy at the existing 1 vCPU / 2 GiB. Enable the timing diagnostics below. From the same EC2 generator and benchmark version, run the small profile, then 1,000 and 2,000 clients separately with `--tasks 3 --seed 42`. Preserve reports and deployment revision. Compare completion and confirmed throughput alongside API/delivery p95 and p99, queue sizes, and timeout counts; quick 503 responses are not a capacity improvement. Roll back the service to its previous task-definition revision if ordinary traffic regresses. No schema migration is required for these changes.
+
+## Backend timing diagnostics
+
+For load-test investigations, set these environment variables on the backend ECS task definition, deploy the updated backend image, and wait for all replacement tasks to become healthy:
+
+```dotenv
+REQUEST_TIMING_ENABLED=true
+REQUEST_TIMING_SLOW_MS=500
+```
+
+Slow requests (500 ms or longer), HTTP 5xx responses, and prematurely closed responses emit a JSON `request_timing` log to stdout. With the ECS `awslogs` driver, find these entries in the backend's CloudWatch log group. Output is capped at one entry per second per backend process; `suppressedSinceLastLog` counts eligible entries omitted since the previous log. These are diagnostic samples, not latency percentiles or a complete error count. Logs include instance hostname, request duration, static route template, status, connection-pool counts, and database operation totals. They exclude tokens, user identifiers, message bodies, SQL, query parameters, and raw errors.
+
+- `dbWaitMs`: total time acquiring database connections, including queueing and connection establishment.
+- `dbQueryMs`: total time awaiting queries after acquiring a connection, including database/network waits. This is not database CPU time.
+- `dbOperations`: calls, failures, connection wait and query time by static operation name, such as `users.resolve` or `messages.insert_and_touch`.
+- `dbPending`: database operations still outstanding when the response closes. Global wait/query totals include elapsed time for those operations; per-operation totals reflect completed phases.
+- `dbOutstanding`: operation names, current phase (`wait` or `query`), and elapsed phase time for unfinished operations.
+- `dbErrors`: sanitized counts (`db_overloaded`, `db_acquire_timeout`, `db_statement_timeout`, `db_lock_timeout`, `db_unavailable`, or `db_error`).
+- `pool.max`, `pool.waiting`, `pool.total`, `pool.idle`: this process's configured maximum and current connection-pool state.
+- `status`: `null` for aborted responses whose headers were never sent; the default HTTP status is not evidence of success.
+
+High `dbWaitMs` with a nonzero pool queue suggests connection contention; high `dbQueryMs` points toward database queries/network/lock/storage waits. Long request duration with low database totals points elsewhere in the application. For parallel queries, summed database time can exceed wall-clock request time. Timing starts when Express receives the request and does not measure CloudFront or ALB queueing. Set `REQUEST_TIMING_ENABLED=false` and redeploy after the investigation. Diagnostics preserve query behavior and pool size; they do not resolve the underlying bottleneck.
+
+CloudWatch Logs Insights (select all backend task streams and the benchmark's time window):
+
+```sql
+fields @timestamp, instance, route, durationMs, dbWaitMs, dbQueryMs, dbCalls, dbPending, pool.waiting, dbOperations
+| filter event = "request_timing"
+| sort @timestamp asc
+| limit 200
+```
+
 ## API
 
 For Artillery setup, AWS/CloudFront testing, saved reports, and performance measurement, see [the load-testing guide](load-tests/README.md).

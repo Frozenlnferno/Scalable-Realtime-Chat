@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { fork } = require('node:child_process');
 const { mapLimit } = require('./pool.cjs');
+const { authFailureCode } = require('./auth-worker.cjs');
 
 function readAccounts(file) {
   let accounts;
@@ -30,7 +31,7 @@ function authenticate(account, cognito) {
     child.once('exit', () => finish(new Error('cognito_worker_failed')));
     child.once('message', result => result.idToken
       ? finish(null, result.idToken)
-      : finish(new Error(result.error === 'additional_authentication_challenge' ? result.error : 'cognito_sign_in_failed')));
+      : finish(new Error(authFailureCode({ name: result.error, message: result.error }))));
     child.send({ account, cognito });
   });
 }
@@ -53,7 +54,8 @@ async function prepare({ accounts, cognito, target, maxDurationMs, signIn = auth
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    if (response.status !== 200) throw new Error('unexpected_http_response');
+    if (response.status !== 200) throw new Error(Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
+      ? `HTTP ${response.status}` : 'unexpected_http_response');
     const data = await response.json();
     const valid = {
       users: () => data?.currentUser?.id && Array.isArray(data.users),
@@ -64,14 +66,23 @@ async function prepare({ accounts, cognito, target, maxDurationMs, signIn = auth
     return data;
   }
   const prepareAccount = async (_, index) => {
+    let stage = 'Cognito sign-in';
     try {
       const token = await signIn(accounts[index], cognito);
+      stage = 'token lifetime validation';
       validateToken(token, Date.now() + maxDurationMs + 60000, cognito);
+      stage = 'GET /api/users preflight';
       const directory = await request('users', token, '/api/users');
       users[index] = { token, id: directory.currentUser.id };
     } catch (error) {
-      const reason = error.message === 'additional_authentication_challenge' ? 'requires an additional authentication challenge' : 'sign-in, token lifetime, or API validation failed';
-      throw new Error(`Account ${index + 1}: ${reason}. No load was started.`);
+      const safeCodes = ['additional_authentication_challenge', 'cognito_sign_in_timeout', 'cognito_worker_failed',
+        'unexpected_http_response', 'unexpected_json_response'];
+      const reason = error.message === 'additional_authentication_challenge' ? 'requires an additional authentication challenge'
+        : safeCodes.includes(error.message) || /^HTTP [1-5][0-9]{2}$/.test(error.message) ? error.message
+        : stage === 'Cognito sign-in' ? authFailureCode(error)
+        : stage === 'token lifetime validation' ? 'invalid token or insufficient remaining lifetime'
+        : ['TimeoutError', 'AbortError', 'SyntaxError'].includes(error.name) ? error.name : 'request_failed';
+      throw new Error(`Account ${index + 1}: ${stage}: ${reason}. No load was started.`);
     }
   };
   await mapLimit(accounts, 4, prepareAccount);

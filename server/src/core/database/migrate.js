@@ -3,7 +3,12 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { pool } from "./pool.js";
+import "dotenv/config";
+import pg from "pg";
+
+// Migrations must not inherit application statement/lock timeouts.
+if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required to run migrations.");
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 const directory = join(dirname(fileURLToPath(import.meta.url)), "../../../migrations");
 

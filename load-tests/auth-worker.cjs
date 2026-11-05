@@ -1,5 +1,13 @@
 // Each account gets a fresh process: Amplify's current-user state is never shared.
 if (require.main === module) process.once('disconnect', () => process.exit(1));
+function authFailureCode(error) {
+  if (error?.message === 'additional_authentication_challenge') return error.message;
+  const name = error?.name === 'Error' ? error.message : error?.name;
+  return ['NotAuthorizedException', 'UserNotFoundException', 'UserNotConfirmedException',
+    'PasswordResetRequiredException', 'TooManyRequestsException', 'LimitExceededException',
+    'ForbiddenException', 'NetworkError', 'InvalidParameterException'].includes(name)
+    ? name : 'cognito_sign_in_failed';
+}
 async function signInAccount(account, cognito, dependencies = {}) {
     const { Amplify } = dependencies.amplify || require('aws-amplify');
     const { signIn, fetchAuthSession } = dependencies.auth || require('aws-amplify/auth');
@@ -26,7 +34,7 @@ if (require.main === module) process.once('message', async ({ account, cognito }
     const idToken = await signInAccount(account, cognito);
     process.send({ idToken }, () => process.exit(0));
   } catch (error) {
-    process.send({ error: error.message === 'additional_authentication_challenge' ? error.message : 'cognito_sign_in_failed' }, () => process.exit(1));
+    process.send({ error: authFailureCode(error) }, () => process.exit(1));
   }
 });
-module.exports = { signInAccount };
+module.exports = { signInAccount, authFailureCode };

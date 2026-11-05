@@ -8,7 +8,7 @@ const { TIMING, THRESHOLDS, VERSION, selectAccounts, schedule, partition } = req
 const { parseOptions, runBenchmark } = require('../bench.cjs');
 const { provision, backoff, provisioningReason } = require('../provision.cjs');
 const { prepare, validateToken } = require('../setup.cjs');
-const { signInAccount } = require('../auth-worker.cjs');
+const { signInAccount, authFailureCode } = require('../auth-worker.cjs');
 const { validateTarget } = require('../pool-runner.cjs');
 const { createWorker } = require('../pool-worker.cjs');
 const { runController } = require('../pool-controller.cjs');
@@ -126,6 +126,15 @@ test('pool preparation uses four auth workers and only one conversation/history 
   assert.throws(() => validateToken('not-a-token', Date.now()), /invalid/);
   const token = `h.${Buffer.from(JSON.stringify({ sub: 'subject', token_use: 'id', aud: 'client', exp })).toString('base64url')}.s`;
   assert.throws(() => validateToken(token, Date.now(), { userPoolClientId: 'other-client' }), /invalid/);
+  for (const code of ['TooManyRequestsException', 'NotAuthorizedException', 'NetworkError']) {
+    assert.equal(authFailureCode({ name: code, message: 'SECRET' }), code);
+    await assert.rejects(prepare({ ...args, signIn: async () => { throw new Error(code); } }),
+      error => error.message.includes(`Cognito sign-in: ${code}`) && !error.message.includes('SECRET'));
+  }
+  assert.equal(authFailureCode(new Error('SECRET')), 'cognito_sign_in_failed');
+  await assert.rejects(prepare({ ...args, fetchImpl: async () => ({ status: 429 }) }), /GET \/api\/users preflight: HTTP 429/);
+  await assert.rejects(prepare({ ...args, fetchImpl: async () => { throw Object.assign(new Error('SECRET'), { name: 'TimeoutError' }); } }),
+    error => /GET \/api\/users preflight: TimeoutError/.test(error.message) && !error.message.includes('SECRET'));
   const realNow = Date.now;
   try {
     let current = realNow(); Date.now = () => current;
@@ -184,8 +193,15 @@ async function workerFixture(mode, overrides = {}) {
     if (mode === 'overlap' || mode === 'limit') await new Promise(resolve => clock.setTimeout(resolve, 250));
     inflight--;
     if (mode === 'ambiguous') throw new Error('SECRET');
+    if (mode === 'network-error') throw Object.assign(new Error('SECRET'), { cause: { code: 'ECONNRESET' } });
     if (mode === 'hang') return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
-    return { status: 201, json: async () => ({ message: mode === 'mismatch' ? { id: 'wrong' } : message }) };
+    if (mode === 'slow-headers') await new Promise(resolve => clock.setTimeout(resolve, 80));
+    return { status: 201, json: async () => {
+      if (mode === 'slow-body') await new Promise(resolve => clock.setTimeout(resolve, 80));
+      if (mode === 'body-hang') await new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('SECRET')), { once: true }));
+      if (mode === 'invalid-json') throw new SyntaxError('SECRET');
+      return { message: mode === 'mismatch' ? { id: 'wrong' } : message };
+    } };
   };
   const worker = await createWorker(config, [0, 1], row => rows.push(row), { clock, connect, fetchImpl });
   const run = async () => {
@@ -195,7 +211,18 @@ async function workerFixture(mode, overrides = {}) {
   return { clock, rows, sockets, requests, run, peak: () => peak, timing };
 }
 
-for (const mode of ['ok', 'overlap', 'drop', 'no-echo', 'ambiguous', 'duplicate', 'disconnect', 'mismatch', 'hang', 'late', 'end-late', 'limit', 'connect-fail', 'slow-connect']) {
+test('fractional timer truncation cannot start sends or socket cleanup before their deadlines', async () => {
+  const f = await workerFixture('ok', { measureMs: 1000.5 });
+  const setTimer = f.clock.setTimeout;
+  f.clock.setTimeout = (fn, ms) => setTimer(fn, Math.max(1, Math.trunc(ms)));
+  await f.clock.drive(f.run());
+  const start = f.rows.find(r => r.type === 'measurement_start');
+  assert.ok(f.rows.find(r => r.type === 'measurement_end').at >= start.end);
+  assert.ok(f.rows.filter(r => r.type === 'socket_close').every(r => r.at >= start.end));
+  assert.ok(f.rows.filter(r => r.type === 'message').every(r => r.at >= r.scheduledAt));
+});
+
+for (const mode of ['ok', 'overlap', 'drop', 'no-echo', 'ambiguous', 'duplicate', 'disconnect', 'mismatch', 'hang', 'slow-headers', 'slow-body', 'body-hang', 'invalid-json', 'network-error', 'late', 'end-late', 'limit', 'connect-fail', 'slow-connect']) {
   test(`clock-controlled persistent worker: ${mode}`, async () => {
     const f = await workerFixture(mode, mode === 'limit' ? { intervalMinMs: 1, intervalMaxMs: 2 } : {});
     if (mode === 'connect-fail' || mode === 'slow-connect') await assert.rejects(f.clock.drive(f.run()), /socket_connect_failed/);
@@ -211,10 +238,19 @@ for (const mode of ['ok', 'overlap', 'drop', 'no-echo', 'ambiguous', 'duplicate'
     if (mode === 'drop') assert.ok(messages.every(r => r.posted && !r.recipient && r.echo));
     if (mode === 'no-echo') assert.ok(messages.every(r => r.posted && r.recipient && !r.echo));
     if (mode === 'ambiguous' || mode === 'hang') assert.ok(messages.every(r => r.ambiguous && !r.posted && r.recipientObserved && r.echoObserved));
+    if (mode === 'hang') assert.ok(messages.every(r => r.httpError === 'headers_deadline' && r.httpState === 'awaiting_headers'));
+    if (mode === 'slow-headers') assert.ok(messages.every(r => r.headersMs === 80 && r.bodyMs === 0 && r.apiMs === 80));
+    if (mode === 'slow-body') assert.ok(messages.every(r => r.headersMs === 0 && r.bodyMs === 80 && r.apiMs === 80));
+    if (mode === 'body-hang') assert.ok(messages.every(r => r.httpError === 'body_deadline' && r.httpState === 'reading_body' && r.status === 201));
+    if (mode === 'invalid-json') assert.ok(messages.every(r => r.httpError === 'invalid_json' && r.status === 201 && !r.posted));
+    if (mode === 'network-error') assert.ok(messages.every(r => r.httpError === 'ECONNRESET' && !r.posted));
     if (mode === 'mismatch') assert.ok(messages.every(r => r.posted && !r.recipient && !r.echo));
     if (mode === 'duplicate') assert.ok(f.rows.some(r => r.type === 'duplicate'));
     if (mode === 'disconnect') assert.ok(f.rows.some(r => r.type === 'disconnect'));
-    if (mode === 'late') assert.ok(messages.every(r => r.missed && !r.attempted));
+    if (mode === 'late') {
+      assert.ok(messages.some(r => r.missed && !r.attempted));
+      assert.ok(messages.every(r => !r.attempted || r.lag <= f.timing.lateMs));
+    }
     if (mode === 'end-late') assert.ok(f.requests.every(at => at < 1200), 'never dispatch after measurement ends');
     if (mode === 'limit') assert.ok(messages.some(r => r.limit));
     assert.equal(f.clock.timers.size, 0);
@@ -239,6 +275,11 @@ for (const mode of ['ok', 'drop', 'http-error', 'connect-error']) {
     if (mode !== 'connect-error') assert.equal(Object.keys(result.summary.generator.workers).length, 2);
     else assert.equal(result.summary.windows.whole.attempted, 0);
     assert.equal(fixture.connected(), 0);
+    if (mode === 'ok') {
+      assert.equal(result.summary.windows.whole.headersMs.count, result.summary.windows.whole.attempted);
+      assert.equal(result.summary.windows.whole.bodyMs.count, result.summary.windows.whole.posted);
+      assert.equal(Object.keys(result.summary.httpDiagnostics.workers).length, 2);
+    }
     for (const name of ['artillery.json', 'summary.json', 'summary.md', 'metadata.json']) {
       assert.doesNotMatch(fs.readFileSync(path.join(result.resultDir, name), 'utf8'), /fixture[0-3]/);
     }
@@ -301,7 +342,7 @@ test('streamed summary includes drain outcomes in scheduled cohorts and rejects 
   for (let index = 0; index < 2; index++) for (const [slot, offset] of schedule(42, index, TIMING).entries()) {
     const at = start + offset;
     rows.push({ type: 'message', index, worker: 0, key: `${index}/${slot}`, scheduledAt: at,
-      attempted: true, posted: true, apiMs: offset >= 60000 ? 510 : 1, lag: 51,
+      attempted: true, posted: true, apiMs: offset >= 60000 ? 510 : 1, headersMs: 1, bodyMs: 2, status: 201, lag: 51,
       recipientObserved: true, echoObserved: true, recipient: { ms: 100, at: end + 1 }, echo: { ms: 100, at: end + 1 }, at: end + 1 });
   }
   rows.push({ type: 'health', worker: 0, at: end + 2 });
@@ -312,6 +353,9 @@ test('streamed summary includes drain outcomes in scheduled cohorts and rejects 
   assert.equal(summary.windows.settled.confirmed, summary.windows.settled.planned);
   assert.equal(summary.windows.whole.receiptTimeConfirmations, 0);
   assert.equal(summary.windows.settled.durationSeconds, 240);
+  assert.equal(summary.windows.whole.headersMs.p95, 1);
+  assert.equal(summary.windows.whole.bodyMs.p95, 2);
+  assert.equal(summary.httpDiagnostics.workers[0].statuses[201], summary.windows.whole.posted);
   assert.equal(summary.capacityEligible, false);
   assert.ok(summary.checks.some(c => c.name.includes('Generator') && !c.passed));
   assert.ok(summary.checks.some(c => c.name.includes('settled: API') && !c.passed));

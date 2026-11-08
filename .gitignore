@@ -1,3 +1,9 @@
 node_modules/
 .env
 dist/
+*.local
+load-tests/results/
+load-tests/*.local.csv
+load-tests/*.local.json
+load-tests/legacy-archive/
+load-tests/*.local.json.*.tmp

@@ -1,4 +1,4 @@
-import { confirmSignUp, signIn, signUp } from 'aws-amplify/auth';
+import { confirmSignUp, fetchAuthSession, getCurrentUser, signIn, signOut, signUp } from 'aws-amplify/auth';
 
 export const register = (email, password) => signUp({
   username: email,
@@ -11,10 +11,25 @@ export const confirmRegistration = (email, code) => confirmSignUp({
   confirmationCode: code,
 });
 
-export const login = (email, password) => signIn({
-  username: email,
-  password,
-});
+export async function login(email, password) {
+  const result = await signIn({ username: email, password });
+  if (!result.isSignedIn) {
+    const step = result.nextStep?.signInStep;
+    throw new Error(step
+      ? `Your account needs another verification step (${step}) before it can open the dashboard.`
+      : 'Sign-in did not complete. Please try again.');
+  }
+  return result;
+}
+
+export async function getAuthenticatedSession() {
+  const [user, session] = await Promise.all([getCurrentUser(), fetchAuthSession()]);
+  const idToken = session.tokens?.idToken;
+  if (!idToken) throw new Error('Your session has expired. Please sign in again.');
+  return { cognitoSub: user.userId, email: idToken.payload.email, idToken: idToken.toString() };
+}
+
+export const logout = () => signOut();
 
 export function getAuthErrorMessage(error) {
   const messages = {
